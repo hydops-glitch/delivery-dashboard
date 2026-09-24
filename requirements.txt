@@ -1,4 +1,5 @@
 streamlit
 pandas
 openpyxl
-xlrd
+gspread
+oauth2client
