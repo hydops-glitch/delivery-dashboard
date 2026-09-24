@@ -1,10 +1,53 @@
 import streamlit as st
 import pandas as pd
 import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from data_processor import process_and_merge_reports
 
 st.set_page_config(page_title="Fulfilment & Delivery Dashboard", layout="wide")
 
+# --- GOOGLE SHEETS CONNECTION ---
+@st.cache_resource
+def get_gspread_client():
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client
+
+def load_saved_remarks():
+    try:
+        client = get_gspread_client()
+        sheet_id = st.secrets["sheets"]["spreadsheet_id"]
+        sheet = client.open_by_key(sheet_id).sheet1
+        records = sheet.get_all_records()
+        return pd.DataFrame(records)
+    except Exception as e:
+        return pd.DataFrame(columns=[
+            'Order_ID', 'Store_Name', 'Delay_Type', 
+            'Order_Type', 'Delay_Reason', 'Submitted_By', 'Timestamp'
+        ])
+
+def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reason, submitted_by="Team"):
+    try:
+        client = get_gspread_client()
+        sheet_id = st.secrets["sheets"]["spreadsheet_id"]
+        sheet = client.open_by_key(sheet_id).sheet1
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sheet.append_row([
+            str(order_id), str(store_name), str(delay_type), 
+            str(order_type), str(delay_reason), str(submitted_by), timestamp
+        ])
+        return True
+    except Exception as e:
+        st.error(f"Error saving to Google Sheet: {e}")
+        return False
+
+# --- SIDEBAR ---
 st.sidebar.header("📁 Step 1: Upload Daily Data")
 picklist_files = st.sidebar.file_uploader(
     "Upload Store Picklist Reports (.xls/.csv)", 
@@ -13,6 +56,10 @@ picklist_files = st.sidebar.file_uploader(
 transaction_file = st.sidebar.file_uploader(
     "Upload Order Transactions Report (.xlsx/.csv)"
 )
+
+# Fetch current database of already submitted remarks
+saved_db = load_saved_remarks()
+saved_order_ids = set(saved_db['Order_ID'].astype(str).unique()) if not saved_db.empty else set()
 
 if picklist_files and transaction_file:
     master_df = process_and_merge_reports(picklist_files, transaction_file)
@@ -103,54 +150,102 @@ if picklist_files and transaction_file:
 
     st.markdown("---")
 
-    # --- SEPARATE TABLES FOR PICKING & DELIVERY DELAYS WITH CUSTOM TEXT INPUT ---
-    tab_pick, tab_del = st.tabs(["🛒 Picking Delays (> 3 Min)", "🚚 Delivery Delays"])
+    # --- TABS FOR TEAM & MANAGER REVIEW ---
+    tab_pick, tab_del, tab_mgr = st.tabs([
+        "🛒 Pending Picking Delays", 
+        "🚚 Pending Delivery Delays", 
+        "📊 Manager Review (Saved Remarks)"
+    ])
     
     with tab_pick:
-        st.subheader("Picking Breached Orders")
-        pick_breached = filtered_df[filtered_df['Pick_SLA_Met'] == 0].copy()
+        st.subheader("Action Required: Submit Custom Picking Delay Reasons")
+        # Filter out orders that already have saved remarks in Google Sheets
+        pick_breached = filtered_df[
+            (filtered_df['Pick_SLA_Met'] == 0) & 
+            (~filtered_df['Order_ID'].astype(str).isin(saved_order_ids))
+        ].copy()
         
         if not pick_breached.empty:
-            edited_pick = st.data_editor(
-                pick_breached[[
-                    'Order_ID', 'Store_Name', 'Order Type', 'Pick Duration', 
-                    'Pick Status', 'Picking_Delay_Reason'
-                ]],
-                column_config={
-                    "Picking_Delay_Reason": st.column_config.TextColumn(
-                        "Picking Delay Reason (Type custom reason)",
-                        help="Double-click to type any custom delay remark"
-                    )
-                },
-                disabled=['Order_ID', 'Store_Name', 'Order Type', 'Pick Duration', 'Pick Status'],
-                hide_index=True,
-                key="pick_editor"
-            )
+            for idx, row in pick_breached.iterrows():
+                c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 2])
+                c1.write(f"**{row['Order_ID']}**")
+                c2.write(row['Store_Name'])
+                c3.write(row['Order Type'])
+                c4.write(row['Pick Duration'])
+                reason_input = c5.text_input("Reason", key=f"p_reason_{row['Order_ID']}", placeholder="Enter custom reason...")
+                
+                if c6.button("Submit & Hide", key=f"p_btn_{row['Order_ID']}"):
+                    if reason_input.strip() != "":
+                        success = append_saved_remark(
+                            order_id=row['Order_ID'],
+                            store_name=row['Store_Name'],
+                            delay_type="Picking Delay",
+                            order_type=row['Order Type'],
+                            delay_reason=reason_input.strip()
+                        )
+                        if success:
+                            st.success(f"Saved & Hidden: {row['Order_ID']}")
+                            st.rerun()
+                    else:
+                        st.warning("Please enter a reason before submitting.")
+                st.divider()
         else:
-            st.success("🎉 Zero picking delays found!")
+            st.success("🎉 All picking delays have been resolved and submitted!")
 
     with tab_del:
-        st.subheader("Delivery Breached Orders")
-        del_breached = filtered_df[filtered_df['On Time Delivered'] == 0].copy()
+        st.subheader("Action Required: Submit Custom Delivery Delay Reasons")
+        # Filter out orders that already have saved remarks in Google Sheets
+        del_breached = filtered_df[
+            (filtered_df['On Time Delivered'] == 0) & 
+            (~filtered_df['Order_ID'].astype(str).isin(saved_order_ids))
+        ].copy()
         
         if not del_breached.empty:
-            edited_del = st.data_editor(
-                del_breached[[
-                    'Order_ID', 'Store_Name', 'Order Type', 'Delivery Partner', 
-                    'Delivery Status', 'Delivery_Delay_Reason'
-                ]],
-                column_config={
-                    "Delivery_Delay_Reason": st.column_config.TextColumn(
-                        "Delivery Delay Reason (Type custom reason)",
-                        help="Double-click to type any custom delay remark"
-                    )
-                },
-                disabled=['Order_ID', 'Store_Name', 'Order Type', 'Delivery Partner', 'Delivery Status'],
-                hide_index=True,
-                key="del_editor"
+            for idx, row in del_breached.iterrows():
+                c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 2])
+                c1.write(f"**{row['Order_ID']}**")
+                c2.write(row['Store_Name'])
+                c3.write(row['Order Type'])
+                c4.write(row['Delivery Partner'])
+                reason_input = c5.text_input("Reason", key=f"d_reason_{row['Order_ID']}", placeholder="Enter custom reason...")
+                
+                if c6.button("Submit & Hide", key=f"d_btn_{row['Order_ID']}"):
+                    if reason_input.strip() != "":
+                        success = append_saved_remark(
+                            order_id=row['Order_ID'],
+                            store_name=row['Store_Name'],
+                            delay_type="Delivery Delay",
+                            order_type=row['Order Type'],
+                            delay_reason=reason_input.strip()
+                        )
+                        if success:
+                            st.success(f"Saved & Hidden: {row['Order_ID']}")
+                            st.rerun()
+                    else:
+                        st.warning("Please enter a reason before submitting.")
+                st.divider()
+        else:
+            st.success("🎉 All delivery delays have been resolved and submitted!")
+
+    with tab_mgr:
+        st.subheader("📊 Submitted Delay Remarks Audit (Manager View)")
+        current_remarks = load_saved_remarks()
+        if not current_remarks.empty:
+            if selected_store != 'All Stores (HYD Region)':
+                current_remarks = current_remarks[current_remarks['Store_Name'] == selected_store]
+            
+            st.dataframe(current_remarks, use_container_width=True)
+            
+            # Export Option
+            csv_data = current_remarks.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Export Submitted Remarks Report",
+                data=csv_data,
+                file_name=f"Delay_Remarks_{selected_store}_{datetime.date.today()}.csv",
+                mime="text/csv"
             )
         else:
-            st.success("🎉 Zero delivery delays found!")
+            st.info("No submitted delay remarks found in Google Sheets database yet.")
 
 else:
     st.title("🚚 Fulfillment & Delivery Performance Dashboard")
