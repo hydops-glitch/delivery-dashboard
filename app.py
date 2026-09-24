@@ -103,7 +103,7 @@ if picklist_files and transaction_file:
 
     st.markdown("---")
 
-    # --- SEPARATE TABLES FOR PICKING & DELIVERY DELAYS ---
+    # --- SEPARATE TABLES FOR PICKING & DELIVERY DELAYS WITH CUSTOM TEXT INPUT ---
     tab_pick, tab_del = st.tabs(["🛒 Picking Delays (> 3 Min)", "🚚 Delivery Delays"])
     
     with tab_pick:
@@ -117,10 +117,9 @@ if picklist_files and transaction_file:
                     'Pick Status', 'Picking_Delay_Reason'
                 ]],
                 column_config={
-                    "Picking_Delay_Reason": st.column_config.SelectboxColumn(
-                        "Picking Delay Reason",
-                        options=["Picker Shortage", "Stock Out", "System/App Issue", "Bin Misplacement", "Other"],
-                        required=True
+                    "Picking_Delay_Reason": st.column_config.TextColumn(
+                        "Picking Delay Reason (Type custom reason)",
+                        help="Double-click to type any custom delay remark"
                     )
                 },
                 disabled=['Order_ID', 'Store_Name', 'Order Type', 'Pick Duration', 'Pick Status'],
@@ -141,10 +140,9 @@ if picklist_files and transaction_file:
                     'Delivery Status', 'Delivery_Delay_Reason'
                 ]],
                 column_config={
-                    "Delivery_Delay_Reason": st.column_config.SelectboxColumn(
-                        "Delivery Delay Reason",
-                        options=["Rider Shortage", "Traffic/Weather", "Customer Unavailable", "Vehicle Breakdown", "Other"],
-                        required=True
+                    "Delivery_Delay_Reason": st.column_config.TextColumn(
+                        "Delivery Delay Reason (Type custom reason)",
+                        help="Double-click to type any custom delay remark"
                     )
                 },
                 disabled=['Order_ID', 'Store_Name', 'Order Type', 'Delivery Partner', 'Delivery Status'],
