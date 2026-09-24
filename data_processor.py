@@ -56,28 +56,31 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     master_df['Pick_Confirmed_Time'] = pd.to_datetime(master_df['Pick_Confirmed_Time'])
     master_df['Delivered Time'] = pd.to_datetime(master_df['Delivered Time'])
     
-    # Calculate picking duration in total seconds
+    # Picking duration calculation
     master_df['Pick_Duration_Sec'] = (
         (master_df['Pick_Confirmed_Time'] - master_df['Order_Placing_Time']).dt.total_seconds()
     ).fillna(0)
-    
-    # Format to readable string "X Min Y Sec"
     master_df['Pick Duration'] = master_df['Pick_Duration_Sec'].apply(format_duration)
     
-    # Rule: Picking SLA met if duration <= 3 minutes (180 seconds)
+    # Pick SLA Rule: Express <= 3 mins (180 secs)
     master_df['Pick_SLA_Met'] = np.where(master_df['Pick_Duration_Sec'] <= 180, 1, 0)
-    master_df['Pick Status'] = np.where(master_df['Pick_SLA_Met'] == 1, 'On Time', 'Breached')
     
-    # Delivery SLA formatting
+    # Dispatch Duration calculation (Pick Confirmed -> Order Dispatch/Created At)
+    if 'Created At' in master_df.columns:
+        master_df['Dispatch_Time'] = pd.to_datetime(master_df['Created At'])
+        master_df['Dispatch_Duration_Sec'] = (
+            (master_df['Dispatch_Time'] - master_df['Pick_Confirmed_Time']).dt.total_seconds()
+        ).fillna(0)
+    else:
+        master_df['Dispatch_Duration_Sec'] = 0
+        
+    master_df['Dispatch Duration'] = master_df['Dispatch_Duration_Sec'].apply(format_duration)
+    # Dispatch SLA Rule: Express <= 6 mins (360 secs)
+    master_df['Dispatch_SLA_Met'] = np.where(master_df['Dispatch_Duration_Sec'] <= 360, 1, 0)
+    
     master_df['Delivery Status'] = np.where(master_df['On Time Delivered'] == 1, 'On Time', 'Breached')
-    
     master_df['Rider_Channel'] = np.where(
-        master_df['Delivery Partner'].astype(str).str.upper() == 'SELF', 'In-House Rider', '3PL Partner'
+        master_df['Delivery Partner'].astype(str).str.upper() == 'SELF', 'Self (In-House)', '3PL Partner'
     )
     
-    if 'Picking_Delay_Reason' not in master_df.columns:
-        master_df['Picking_Delay_Reason'] = ''
-    if 'Delivery_Delay_Reason' not in master_df.columns:
-        master_df['Delivery_Delay_Reason'] = ''
-        
     return master_df
