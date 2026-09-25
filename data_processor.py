@@ -50,13 +50,24 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     
     raw_picklist = pd.concat(picklist_frames, ignore_index=True)
     
+    # Clean Order Reference & drop blank/empty Order References
+    if 'Order Reference' in raw_picklist.columns:
+        raw_picklist['Order Reference'] = raw_picklist['Order Reference'].astype(str).str.strip()
+        raw_picklist = raw_picklist[
+            raw_picklist['Order Reference'].notna() & 
+            (raw_picklist['Order Reference'] != '') & 
+            (raw_picklist['Order Reference'] != 'nan') &
+            (raw_picklist['Order Reference'] != 'None')
+        ]
+    
     # Ensure numeric picking time in seconds
     if 'Picking Time In Seconds' in raw_picklist.columns:
         raw_picklist['Picking Time In Seconds'] = pd.to_numeric(raw_picklist['Picking Time In Seconds'], errors='coerce').fillna(0)
     else:
         raw_picklist['Picking Time In Seconds'] = 0
 
-    # Aggregate Picklist Data directly using Picking Time In Seconds
+    # DEDUPLICATE AT ORDER LEVEL (Fixes SKU duplicate row multiplication)
+    # Since picking time in seconds is logged per picklist/order, we take max/first instead of summing across SKU rows
     pick_agg = raw_picklist.groupby('Order Reference').agg({
         'Warehouse': 'first',
         'Order Date': 'first',
@@ -64,7 +75,7 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
         'Picklist Creation Date&Time': 'first',
         'Picking Start Time': 'min',
         'Picklist Confirmation Date&Time': 'max',
-        'Picking Time In Seconds': 'sum',
+        'Picking Time In Seconds': 'max',
         'Picker Name': 'first',
         'Picklist Status': 'first'
     }).reset_index()
@@ -83,6 +94,8 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     
     if 'ID' in trans_clean.columns:
         trans_clean.rename(columns={'ID': 'Order_ID'}, inplace=True)
+    
+    trans_clean['Order_ID'] = trans_clean['Order_ID'].astype(str).str.strip()
         
     status_col = 'Order State' if 'Order State' in trans_clean.columns else (trans_clean.columns[2] if len(trans_clean.columns) >= 3 else 'Status')
 
@@ -90,9 +103,14 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     excluded_statuses = ['PAYMENT FAILED', 'CANCELLED']
     trans_filtered = trans_clean[~trans_clean[status_col].astype(str).str.strip().str.upper().isin(excluded_statuses)].copy()
 
-    # Merge Picklist and Filtered Transactions
-    master_df = pd.merge(pick_agg, trans_filtered, on='Order_ID', how='inner')
+    # Left Merge to preserve all orders from Picklist
+    master_df = pd.merge(pick_agg, trans_filtered, on='Order_ID', how='left')
     
+    # Store Name Fallback
+    if 'Store_Name' not in master_df.columns or master_df['Store_Name'].isna().all():
+        if 'Warehouse' in master_df.columns:
+            master_df['Store_Name'] = master_df['Warehouse']
+
     # Date Handling
     if 'Order_Placing_Time' in master_df.columns:
         master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Order_Placing_Time'], errors='coerce').dt.tz_localize(None)
@@ -130,6 +148,7 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     
     # 3. Delivery SLA & Channel
     if 'On Time Delivered' in master_df.columns:
+        master_df['On Time Delivered'] = pd.to_numeric(master_df['On Time Delivered'], errors='coerce').fillna(0)
         master_df['Delivery Status'] = np.where(master_df['On Time Delivered'] == 1, 'On Time', 'Breached')
     else:
         master_df['On Time Delivered'] = 0
