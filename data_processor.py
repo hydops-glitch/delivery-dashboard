@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import io
 
 def format_duration(seconds):
     if pd.isna(seconds) or seconds < 0:
@@ -8,13 +9,45 @@ def format_duration(seconds):
     secs = int(seconds % 60)
     return f"{mins} Min {secs:02d} Sec"
 
+def read_file_safely(file):
+    """Robust file reader handling .xlsx, .xls, CSV, and varied text encodings."""
+    # Read bytes once so we can retry parsing
+    if hasattr(file, 'read'):
+        content = file.read()
+        if hasattr(file, 'seek'):
+            file.seek(0)
+    else:
+        content = file
+
+    # 1. Try reading as standard Excel (.xlsx / .xls)
+    try:
+        return pd.read_excel(io.BytesIO(content))
+    except Exception:
+        pass
+
+    # 2. Try CSV/TSV with various encodings & separators
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+    separators = [None, '\t', ',', ';'] # None lets pandas auto-detect
+
+    for enc in encodings:
+        for sep in separators:
+            try:
+                if sep is None:
+                    df = pd.read_csv(io.BytesIO(content), encoding=enc, engine='python')
+                else:
+                    df = pd.read_csv(io.BytesIO(content), encoding=enc, sep=sep)
+                if df.shape[1] > 1: # Successfully split into columns
+                    return df
+            except Exception:
+                continue
+
+    # Final fallback
+    return pd.read_csv(io.BytesIO(content), encoding='latin-1', on_bad_lines='skip')
+
 def process_and_merge_reports(picklist_files_list, transactions_file_path):
     picklist_frames = []
     for file in picklist_files_list:
-        try:
-            df = pd.read_excel(file)
-        except Exception:
-            df = pd.read_csv(file, sep='\t')
+        df = read_file_safely(file)
         picklist_frames.append(df)
     
     raw_picklist = pd.concat(picklist_frames, ignore_index=True)
@@ -41,11 +74,8 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     }, inplace=True)
     
     # Read Transactions Data
-    try:
-        df_trans = pd.read_excel(transactions_file_path)
-    except Exception:
-        df_trans = pd.read_csv(transactions_file_path)
-        
+    df_trans = read_file_safely(transactions_file_path)
+    
     trans_clean = df_trans.copy()
     if 'ID' in trans_clean.columns:
         trans_clean.rename(columns={'ID': 'Order_ID'}, inplace=True)
@@ -53,7 +83,7 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     # Merge Picklist and Transactions
     master_df = pd.merge(pick_agg, trans_clean, on='Order_ID', how='inner')
     
-    # Strip Timezone info & convert to Datetime for accurate calculations
+    # Strip Timezone info & convert to Datetime
     master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Order_Placing_Time']).dt.tz_localize(None)
     master_df['Pick_Confirmed_Time'] = pd.to_datetime(master_df['Pick_Confirmed_Time']).dt.tz_localize(None)
     
@@ -70,7 +100,7 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     # Pick SLA Rule: Express <= 3 mins (180 secs)
     master_df['Pick_SLA_Met'] = np.where(master_df['Pick_Duration_Sec'] <= 180, 1, 0)
     
-    # 2. Dispatch Duration Calculation (Detect correct dispatch timestamp)
+    # 2. Dispatch Duration Calculation
     dispatch_col = None
     for col in ['Dispatched At', 'Dispatch Time', 'Handover Time', 'Out For Delivery Time', 'Created At']:
         if col in master_df.columns:
@@ -79,20 +109,14 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
 
     if dispatch_col:
         master_df['Dispatch_Time'] = pd.to_datetime(master_df[dispatch_col]).dt.tz_localize(None)
-        
-        # Calculate time elapsed between Pick Confirmation and Dispatch
         master_df['Dispatch_Duration_Sec'] = (
             (master_df['Dispatch_Time'] - master_df['Pick_Confirmed_Time']).dt.total_seconds()
         ).fillna(0)
-        
-        # Prevent negative durations if time stamps are out of order
         master_df['Dispatch_Duration_Sec'] = master_df['Dispatch_Duration_Sec'].apply(lambda x: max(x, 0))
     else:
         master_df['Dispatch_Duration_Sec'] = 0
 
     master_df['Dispatch Duration'] = master_df['Dispatch_Duration_Sec'].apply(format_duration)
-    
-    # Express Dispatch SLA Rule: <= 6 minutes (360 seconds)
     master_df['Dispatch_SLA_Met'] = np.where(master_df['Dispatch_Duration_Sec'] <= 360, 1, 0)
     
     # 3. Delivery SLA & Channel
