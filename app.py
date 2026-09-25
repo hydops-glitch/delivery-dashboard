@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -136,9 +137,16 @@ def save_daily_kpis(kpi_df):
         sheet_id = st.secrets["sheets"]["spreadsheet_id"]
         sheet = client.open_by_key(sheet_id).worksheet("Daily_KPIs")
         sheet.clear()
+        
         export_df = kpi_df.copy()
+        
+        # FIX FOR JSON SERIALIZATION: Clean NaN and Inf values
+        export_df = export_df.fillna(0.0)
+        export_df = export_df.replace([np.inf, -np.inf], 0.0)
+        
         if 'Date' in export_df.columns:
             export_df['Date'] = export_df['Date'].astype(str)
+            
         sheet.update([export_df.columns.values.tolist()] + export_df.values.tolist())
         return True
     except Exception as e:
@@ -211,27 +219,33 @@ if uploaded_files:
         save_daily_kpis(combined_kpis)
         st.sidebar.success("Reports parsed & synced to Google Sheets!")
 
-# --- LOAD ACTIVE DATASET & DATES (CRASH-PROOF) ---
+# --- LOAD ACTIVE DATASET & DYNAMIC FULL DATE RANGE ---
 has_live_data = 'master_df' in st.session_state and isinstance(st.session_state['master_df'], pd.DataFrame) and not st.session_state['master_df'].empty
 kpi_history = load_saved_kpis()
 
+earliest_date = datetime.date.today()
 latest_date = datetime.date.today()
 
 if has_live_data:
     try:
         placed_times = pd.to_datetime(st.session_state['master_df']['Placed_Time'], errors='coerce').dropna()
         if not placed_times.empty:
+            earliest_date = placed_times.dt.date.min()
             latest_date = placed_times.dt.date.max()
     except Exception:
-        latest_date = datetime.date.today()
+        pass
 elif isinstance(kpi_history, pd.DataFrame) and not kpi_history.empty and 'Date' in kpi_history.columns:
     try:
         parsed_dates = pd.to_datetime(kpi_history['Date'], errors='coerce').dropna()
         if not parsed_dates.empty:
+            earliest_date = parsed_dates.dt.date.min()
             latest_date = parsed_dates.dt.date.max()
     except Exception:
-        latest_date = datetime.date.today()
+        pass
 
+# Fallback check
+if pd.isna(earliest_date) or not isinstance(earliest_date, datetime.date):
+    earliest_date = datetime.date.today()
 if pd.isna(latest_date) or not isinstance(latest_date, datetime.date):
     latest_date = datetime.date.today()
 
@@ -249,7 +263,14 @@ with col_mode:
     selected_view_mode = st.selectbox("Select View Mode", ["Overall Region View", "Store Level View"], index=1, label_visibility="collapsed")
 
 with col_date:
-    selected_date_range = st.date_input("Filter Date", value=(latest_date, latest_date), max_value=latest_date, label_visibility="collapsed")
+    # Set default date range to cover whole uploaded dataset (July to till date)
+    selected_date_range = st.date_input(
+        "Filter Date", 
+        value=(earliest_date, latest_date), 
+        min_value=earliest_date,
+        max_value=latest_date, 
+        label_visibility="collapsed"
+    )
 
 with col_ref:
     if st.button("🔄 Refresh All", use_container_width=True):
@@ -261,7 +282,7 @@ def resolve_dates(d_range):
     if isinstance(d_range, (tuple, list)):
         if len(d_range) == 2: return d_range[0], d_range[1]
         elif len(d_range) == 1: return d_range[0], d_range[0]
-    return latest_date, latest_date
+    return earliest_date, latest_date
 
 start_date, end_date = resolve_dates(selected_date_range)
 
@@ -432,7 +453,7 @@ if selected_view_mode == "Store Level View":
     
     if has_live_data:
         store_rows = []
-        for store, s_group in filtered_df.groupby('Store_Name'):
+        for (order_date, store), s_group in filtered_df.groupby([filtered_df['Placed_Time'].dt.date, 'Store_Name']):
             s_exp = s_group[s_group['Order_Type_Clean'] == 'express']
             s_std = s_group[s_group['Order_Type_Clean'] != 'express']
             
@@ -453,7 +474,7 @@ if selected_view_mode == "Store Level View":
             s_cpo = round((s_riders * 1050) / s_deliv_tot, 2) if s_deliv_tot > 0 else 0.0
             
             store_rows.append({
-                'Date': str(start_date),
+                'Date': str(order_date),
                 'Store_Name': store,
                 'Express_Packed_SLA': p_pack,
                 'Express_Dispatch_SLA': p_disp,
