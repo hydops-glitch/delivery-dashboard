@@ -121,6 +121,67 @@ if picklist_files and transaction_file:
     save_daily_kpis(combined_kpis)
     st.sidebar.success("Reports processed & KPIs saved to Google Sheets!")
 
+# --- ALWAYS-VISIBLE TOP FILTER BAR ---
+has_live_data = 'master_df' in st.session_state
+kpi_history = load_saved_kpis()
+
+col_view, col_filter_type, col_picker = st.columns([3, 2, 3])
+
+all_stores_list = []
+if has_live_data:
+    all_stores_list = sorted(list(st.session_state['master_df']['Store_Name'].unique()))
+elif not kpi_history.empty and 'Store_Name' in kpi_history.columns:
+    all_stores_list = sorted(list(kpi_history['Store_Name'].unique()))
+
+if url_store and url_store in all_stores_list:
+    selected_view = "Single Store Restricted View"
+    st.info(f"🔒 Access Restricted View: **{url_store}**")
+else:
+    with col_view:
+        selected_view = st.radio("👁️ View Mode", ["Overall Region View", "All Stores Single View"], horizontal=True)
+
+with col_filter_type:
+    date_filter_mode = st.radio("📅 Date Filter", ["Reporting Cycle", "Custom Range"], horizontal=True)
+
+today_day = datetime.date.today().day
+default_cycle_idx = 0 if today_day <= 7 else (1 if today_day <= 14 else (2 if today_day <= 21 else 3))
+
+selected_cycle = None
+selected_date_range = None
+
+with col_picker:
+    if date_filter_mode == "Reporting Cycle":
+        selected_cycle = st.selectbox(
+            "Select Cycle",
+            ["Cycle 1 (1st - 7th)", "Cycle 2 (8th - 14th)", "Cycle 3 (15th - 21st)", "Cycle 4 (22nd - End)"],
+            index=default_cycle_idx
+        )
+    else:
+        selected_date_range = st.date_input(
+            "Select Date Range", 
+            value=(datetime.date.today() - datetime.timedelta(days=7), datetime.date.today())
+        )
+
+# Helper function to filter historical Google Sheets KPI dataframe
+def filter_kpi_history(df):
+    if df.empty:
+        return df
+    res = df.copy()
+    res['Date'] = pd.to_datetime(res['Date'], errors='coerce')
+    
+    if date_filter_mode == "Reporting Cycle" and selected_cycle:
+        if selected_cycle == "Cycle 1 (1st - 7th)":
+            res = res[res['Date'].dt.day.between(1, 7)]
+        elif selected_cycle == "Cycle 2 (8th - 14th)":
+            res = res[res['Date'].dt.day.between(8, 14)]
+        elif selected_cycle == "Cycle 3 (15th - 21st)":
+            res = res[res['Date'].dt.day.between(15, 21)]
+        elif selected_cycle == "Cycle 4 (22nd - End)":
+            res = res[res['Date'].dt.day >= 22]
+    elif date_filter_mode == "Custom Range" and isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
+        res = res[(res['Date'].dt.date >= selected_date_range[0]) & (res['Date'].dt.date <= selected_date_range[1])]
+    return res
+
 # --- HELPER FUNCTION TO GENERATE STORE METRICS TABLE ---
 def build_store_summary_table(df):
     store_stats = []
@@ -149,54 +210,26 @@ def build_store_summary_table(df):
         })
     return pd.DataFrame(store_stats)
 
-# --- MAIN DASHBOARD VIEW ---
-if 'master_df' in st.session_state:
+# --- LIVE DATA VIEW ---
+if has_live_data:
     master_df = st.session_state['master_df']
-    all_stores_list = sorted(list(master_df['Store_Name'].unique()))
-    
-    col_view, col_filter_type, col_picker = st.columns([3, 2, 3])
-    
-    # Store Link Access Restriction Logic
-    if url_store and url_store in all_stores_list:
-        selected_view = "Single Store Restricted View"
-        st.info(f"🔒 Access Restricted View: **{url_store}**")
-    else:
-        with col_view:
-            selected_view = st.radio("👁️ View Mode", ["Overall Region View", "All Stores Single View"], horizontal=True)
-            
-    with col_filter_type:
-        date_filter_mode = st.radio("📅 Date Filter", ["Reporting Cycle", "Custom Range"], horizontal=True)
-        
-    today_day = datetime.date.today().day
-    default_cycle_idx = 0 if today_day <= 7 else (1 if today_day <= 14 else (2 if today_day <= 21 else 3))
-
-    # Apply Date Filtering across Master Data
     filtered_df = master_df.copy()
-    with col_picker:
-        if date_filter_mode == "Reporting Cycle":
-            cycle_period = st.selectbox(
-                "Select Cycle",
-                ["Cycle 1 (1st - 7th)", "Cycle 2 (8th - 14th)", "Cycle 3 (15th - 21st)", "Cycle 4 (22nd - End)"],
-                index=default_cycle_idx
-            )
-            if cycle_period == "Cycle 1 (1st - 7th)":
-                filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day.between(1, 7)]
-            elif cycle_period == "Cycle 2 (8th - 14th)":
-                filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day.between(8, 14)]
-            elif cycle_period == "Cycle 3 (15th - 21st)":
-                filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day.between(15, 21)]
-            elif cycle_period == "Cycle 4 (22nd - End)":
-                filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day >= 22]
-        else:
-            date_range = st.date_input("Select Date Range", value=(datetime.date.today() - datetime.timedelta(days=7), datetime.date.today()))
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                start_date, end_date = date_range
-                filtered_df = filtered_df[
-                    (filtered_df['Order_Placing_Time'].dt.date >= start_date) & 
-                    (filtered_df['Order_Placing_Time'].dt.date <= end_date)
-                ]
 
-    # Render Overall View vs Single Restricted Store vs All Stores View
+    if date_filter_mode == "Reporting Cycle":
+        if selected_cycle == "Cycle 1 (1st - 7th)":
+            filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day.between(1, 7)]
+        elif selected_cycle == "Cycle 2 (8th - 14th)":
+            filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day.between(8, 14)]
+        elif selected_cycle == "Cycle 3 (15th - 21st)":
+            filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day.between(15, 21)]
+        elif selected_cycle == "Cycle 4 (22nd - End)":
+            filtered_df = filtered_df[filtered_df['Order_Placing_Time'].dt.day >= 22]
+    elif date_filter_mode == "Custom Range" and isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
+        filtered_df = filtered_df[
+            (filtered_df['Order_Placing_Time'].dt.date >= selected_date_range[0]) & 
+            (filtered_df['Order_Placing_Time'].dt.date <= selected_date_range[1])
+        ]
+
     if url_store and url_store in all_stores_list:
         filtered_df = filtered_df[filtered_df['Store_Name'] == url_store]
         st.title(f"🏬 Store Performance: {url_store}")
@@ -207,7 +240,6 @@ if 'master_df' in st.session_state:
 
     st.markdown("---")
 
-    # Overall KPIs Banner
     exp_df = filtered_df[filtered_df['Order Type'].str.lower() == 'express']
     sched_df = filtered_df[filtered_df['Order Type'].str.lower() != 'express']
     
@@ -229,7 +261,6 @@ if 'master_df' in st.session_state:
 
     st.markdown("---")
 
-    # ALL STORES SINGLE VIEW TABLE
     if selected_view == "All Stores Single View" and not url_store:
         st.subheader("📊 Store-by-Store Comparison (Single View)")
         store_comparison_df = build_store_summary_table(filtered_df)
@@ -296,23 +327,26 @@ if 'master_df' in st.session_state:
         else:
             st.info("No saved remarks found in Google Sheets yet.")
 
-# HISTORICAL VIEW (DEFAULT LANDING VIEW)
+# --- HISTORICAL VIEW (DEFAULT LANDING VIEW) ---
 else:
     st.title("🌐 Delivery & Fulfillment Historical Performance")
     st.info("💡 Displaying historical performance trends from Google Sheets. Upload fresh daily reports via the sidebar to process new orders.")
     
-    kpi_history = load_saved_kpis()
-    
     if not kpi_history.empty:
+        filtered_kpi = filter_kpi_history(kpi_history)
+        
+        if url_store and url_store in all_stores_list:
+            filtered_kpi = filtered_kpi[filtered_kpi['Store_Name'] == url_store]
+
         st.subheader("📈 Persistent Performance Metrics")
         
-        exp_pack_avg = kpi_history['Express_Packed_SLA'].mean() if not kpi_history.empty else 0
-        exp_del_avg = kpi_history['Express_Delivered_SLA'].mean() if not kpi_history.empty else 0
-        sched_del_avg = kpi_history['Scheduled_Delivered_SLA'].mean() if not kpi_history.empty else 0
+        exp_pack_avg = filtered_kpi['Express_Packed_SLA'].mean() if not filtered_kpi.empty else 0
+        exp_del_avg = filtered_kpi['Express_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
+        sched_del_avg = filtered_kpi['Scheduled_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
         
-        tot_vol = kpi_history['Total_Orders'].sum() if not kpi_history.empty else 0
-        self_vol = kpi_history['Self_Orders'].sum() if not kpi_history.empty else 0
-        tpl_vol = kpi_history['TPL_Orders'].sum() if not kpi_history.empty else 0
+        tot_vol = filtered_kpi['Total_Orders'].sum() if not filtered_kpi.empty else 0
+        self_vol = filtered_kpi['Self_Orders'].sum() if not filtered_kpi.empty else 0
+        tpl_vol = filtered_kpi['TPL_Orders'].sum() if not filtered_kpi.empty else 0
         
         hk1, hk2, hk3, hk4 = st.columns(4)
         hk1.metric("Avg Express Packed SLA", f"{exp_pack_avg:.1f}%")
@@ -322,7 +356,7 @@ else:
         
         st.markdown("---")
         st.subheader("📋 Store-by-Store Historical Table")
-        st.dataframe(kpi_history, use_container_width=True)
+        st.dataframe(filtered_kpi, use_container_width=True)
     else:
         st.warning("No historical performance data saved yet. Upload your first report from the sidebar to store KPIs!")
 
