@@ -44,8 +44,11 @@ def process_and_merge_reports(file_list):
     # Order Type Identification
     type_col = next((col_map[k] for k in col_map if any(x in k for x in ['type', 'channel', 'category', 'service'])), None)
     if type_col:
-        df['Order_Type_Clean'] = df[type_col].astype(str).str.lower().apply(
-            lambda x: 'express' if any(k in x for k in ['express', '15', '30', 'exp', 'quick']) else 'standard'
+        type_str = df[type_col].astype(str).str.lower()
+        df['Order_Type_Clean'] = np.where(
+            type_str.str.contains('express|15|30|exp|quick', regex=True, na=False),
+            'express',
+            'standard'
         )
     else:
         df['Order_Type_Clean'] = 'standard'
@@ -53,8 +56,11 @@ def process_and_merge_reports(file_list):
     # Fulfillment Type
     deliv_mode_col = next((col_map[k] for k in col_map if any(x in k for x in ['mode', 'rider_type', 'fulfillment', 'fleet', '3pl', 'partner'])), None)
     if deliv_mode_col:
-        df['Fulfillment_Type'] = df[deliv_mode_col].astype(str).apply(
-            lambda x: '3PL' if any(k in x.lower() for k in ['shadowfax', 'grab', 'porter', '3pl', 'third', 'external']) else 'Self'
+        mode_str = df[deliv_mode_col].astype(str).str.lower()
+        df['Fulfillment_Type'] = np.where(
+            mode_str.str.contains('shadowfax|grab|porter|3pl|third|external', regex=True, na=False),
+            '3PL',
+            'Self'
         )
     else:
         df['Fulfillment_Type'] = 'Self'
@@ -62,25 +68,30 @@ def process_and_merge_reports(file_list):
     # Order Status
     status_col = next((col_map[k] for k in col_map if any(x in k for x in ['status', 'state', 'stage'])), None)
     if status_col:
-        df['Order_Status'] = df[status_col].astype(str).str.upper().apply(
-            lambda x: 'DELIVERED' if any(k in x for k in ['DELIVERED', 'COMPLETED', 'DISPATCHED', 'SUCCESS']) else x
+        status_str = df[status_col].astype(str).str.upper()
+        df['Order_Status'] = np.where(
+            status_str.str.contains('DELIVERED|COMPLETED|DISPATCHED|SUCCESS', regex=True, na=False),
+            'DELIVERED',
+            status_str
         )
     else:
         df['Order_Status'] = 'DELIVERED'
 
-    # STRICT SLA CALCULATION - NO FAKE DEFAULT 100%
+    # STRICT SLA CALCULATION - Vectorized String Matching
     pick_col = next((col_map[k] for k in col_map if any(x in k for x in ['pick_duration', 'pack_duration', 'pick_sla', 'pack_time'])), None)
     if pick_col and pd.api.types.is_numeric_dtype(df[pick_col]):
         df['Pick_SLA_Met'] = np.where(df[pick_col] <= 3, 1, 0)
     else:
-        # Check boolean or status string column if numeric duration is absent
         pick_status_col = next((col_map[k] for k in col_map if 'pick' in k or 'pack' in k), None)
         if pick_status_col:
-            df['Pick_SLA_Met'] = df[pick_status_col].astype(str).str.lower().apply(
-                lambda x: 1 if any(k in x for k in ['met', 'pass', '1', 'true', 'on_time']) else 0
+            p_str = df[pick_status_col].astype(str).str.lower()
+            df['Pick_SLA_Met'] = np.where(
+                p_str.str.contains('met|pass|1|true|on_time', regex=True, na=False),
+                1,
+                0
             )
         else:
-            df['Pick_SLA_Met'] = np.nan  # Set as NaN so missing SLA data isn't disguised as 100%
+            df['Pick_SLA_Met'] = np.nan
 
     disp_col = next((col_map[k] for k in col_map if any(x in k for x in ['dispatch_duration', 'dispatch_sla', 'dispatch_time'])), None)
     if disp_col and pd.api.types.is_numeric_dtype(df[disp_col]):
@@ -88,8 +99,11 @@ def process_and_merge_reports(file_list):
     else:
         disp_status_col = next((col_map[k] for k in col_map if 'dispatch' in k), None)
         if disp_status_col:
-            df['Dispatch_SLA_Met'] = df[disp_status_col].astype(str).str.lower().apply(
-                lambda x: 1 if any(k in x for k in ['met', 'pass', '1', 'true', 'on_time']) else 0
+            d_str = df[disp_status_col].astype(str).str.lower()
+            df['Dispatch_SLA_Met'] = np.where(
+                d_str.str.contains('met|pass|1|true|on_time', regex=True, na=False),
+                1,
+                0
             )
         else:
             df['Dispatch_SLA_Met'] = np.nan
@@ -100,8 +114,11 @@ def process_and_merge_reports(file_list):
     else:
         del_status_col = next((col_map[k] for k in col_map if 'delivery' in k or 'sla' in k), None)
         if del_status_col:
-            df['On_Time_Delivered'] = df[del_status_col].astype(str).str.lower().apply(
-                lambda x: 1 if any(k in x for k in ['met', 'pass', '1', 'true', 'on_time']) else 0
+            del_str = df[del_status_col].astype(str).str.lower()
+            df['On_Time_Delivered'] = np.where(
+                del_str.str.contains('met|pass|1|true|on_time', regex=True, na=False),
+                1,
+                0
             )
         else:
             df['On_Time_Delivered'] = np.nan
