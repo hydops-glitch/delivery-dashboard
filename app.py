@@ -114,7 +114,7 @@ def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reas
         sheet.append_row([str(order_id), str(store_name), str(delay_type), str(order_type), str(delay_reason), str(user_name), timestamp])
         return True
     except Exception as e:
-        st.error(f"Error saving remark to GSheet: {e}")
+        st.error(f"Error saving remark: {e}")
         return False
 
 def load_saved_kpis():
@@ -159,67 +159,81 @@ saved_order_ids = set(saved_db['Order_ID'].astype(str).unique()) if not saved_db
 
 if uploaded_files:
     master_df = process_and_merge_reports(uploaded_files)
-    st.session_state['master_df'] = master_df
-    
-    # Exact Google Sheets Structure Alignment (Columns A - M)
-    daily_summary = []
-    for (order_date, store), group in master_df.groupby([master_df['Placed_Time'].dt.date, 'Store_Name']):
-        exp_group = group[group['Order_Type_Clean'] == 'express']
-        sched_group = group[group['Order_Type_Clean'] != 'express']
+    if not master_df.empty:
+        st.session_state['master_df'] = master_df
         
-        deliv_exp = exp_group[exp_group['Order_Status'] == 'DELIVERED']
-        deliv_sched = sched_group[sched_group['Order_Status'] == 'DELIVERED']
+        daily_summary = []
+        for (order_date, store), group in master_df.groupby([master_df['Placed_Time'].dt.date, 'Store_Name']):
+            exp_group = group[group['Order_Type_Clean'] == 'express']
+            sched_group = group[group['Order_Type_Clean'] != 'express']
+            
+            deliv_exp = exp_group[exp_group['Order_Status'] == 'DELIVERED']
+            deliv_sched = sched_group[sched_group['Order_Status'] == 'DELIVERED']
 
-        exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
-        exp_disp_sla = round((exp_group['Dispatch_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+            exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+            exp_disp_sla = round((exp_group['Dispatch_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+            
+            exp_del_sla = round((deliv_exp['On_Time_Delivered'].sum() / len(deliv_exp) * 100), 1) if len(deliv_exp) > 0 else 0.0
+            std_del_sla = round((deliv_sched['On_Time_Delivered'].sum() / len(deliv_sched) * 100), 1) if len(deliv_sched) > 0 else 0.0
+            
+            deliv_group = group[group['Order_Status'] == 'DELIVERED']
+            self_delivered = len(deliv_group[deliv_group['Fulfillment_Type'] == 'Self'])
+            tpl_delivered = len(deliv_group[deliv_group['Fulfillment_Type'] == '3PL'])
+            
+            active_riders = group[group['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
+            total_delivered = len(deliv_group)
+            store_cpo = round((active_riders * 1050) / total_delivered, 2) if total_delivered > 0 else 0.0
+            
+            daily_summary.append({
+                'Date': str(order_date),
+                'Store_Name': store,
+                'Express_Packed_SLA': exp_pack_sla,
+                'Express_Dispatch_SLA': exp_disp_sla,
+                'Express_Delivery_SLA': exp_del_sla,
+                'Standard_Delivery_SLA': std_del_sla,
+                'Express_Orders': len(exp_group),
+                'Standard_Orders': len(sched_group),
+                'Total_Delivered': total_delivered,
+                'Active_Riders': active_riders,
+                'Self_Delivered': self_delivered,
+                '3PL_Delivered': tpl_delivered,
+                'Store_CPO': store_cpo
+            })
         
-        exp_del_sla = round((deliv_exp['On_Time_Delivered'].sum() / len(deliv_exp) * 100), 1) if len(deliv_exp) > 0 else 0.0
-        std_del_sla = round((deliv_sched['On_Time_Delivered'].sum() / len(deliv_sched) * 100), 1) if len(deliv_sched) > 0 else 0.0
+        new_kpi_df = pd.DataFrame(daily_summary)
+        existing_kpi_df = load_saved_kpis()
         
-        deliv_group = group[group['Order_Status'] == 'DELIVERED']
-        self_delivered = len(deliv_group[deliv_group['Fulfillment_Type'] == 'Self'])
-        tpl_delivered = len(deliv_group[deliv_group['Fulfillment_Type'] == '3PL'])
-        
-        active_riders = group[group['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
-        total_delivered = len(deliv_group)
-        store_cpo = round((active_riders * 1050) / total_delivered, 2) if total_delivered > 0 else 0.0
-        
-        daily_summary.append({
-            'Date': str(order_date),                  # Col A
-            'Store_Name': store,                      # Col B
-            'Express_Packed_SLA': exp_pack_sla,        # Col C
-            'Express_Dispatch_SLA': exp_disp_sla,      # Col D
-            'Express_Delivery_SLA': exp_del_sla,      # Col E
-            'Standard_Delivery_SLA': std_del_sla,    # Col F
-            'Express_Orders': len(exp_group),          # Col G
-            'Standard_Orders': len(sched_group),      # Col H
-            'Total_Delivered': total_delivered,        # Col I
-            'Active_Riders': active_riders,            # Col J
-            'Self_Delivered': self_delivered,          # Col K
-            '3PL_Delivered': tpl_delivered,            # Col L
-            'Store_CPO': store_cpo                     # Col M
-        })
-    
-    new_kpi_df = pd.DataFrame(daily_summary)
-    existing_kpi_df = load_saved_kpis()
-    
-    if not existing_kpi_df.empty:
-        combined_kpis = pd.concat([existing_kpi_df, new_kpi_df]).drop_duplicates(subset=['Date', 'Store_Name'], keep='last')
-    else:
-        combined_kpis = new_kpi_df
-        
-    save_daily_kpis(combined_kpis)
-    st.sidebar.success("Reports parsed & synced to Google Sheets!")
+        if not existing_kpi_df.empty:
+            combined_kpis = pd.concat([existing_kpi_df, new_kpi_df]).drop_duplicates(subset=['Date', 'Store_Name'], keep='last')
+        else:
+            combined_kpis = new_kpi_df
+            
+        save_daily_kpis(combined_kpis)
+        st.sidebar.success("Reports parsed & synced to Google Sheets!")
 
-# --- LOAD ACTIVE DATASET & DATES ---
-has_live_data = 'master_df' in st.session_state
+# --- LOAD ACTIVE DATASET & DATES (CRASH-PROOF) ---
+has_live_data = 'master_df' in st.session_state and isinstance(st.session_state['master_df'], pd.DataFrame) and not st.session_state['master_df'].empty
 kpi_history = load_saved_kpis()
 
 latest_date = datetime.date.today()
+
 if has_live_data:
-    latest_date = st.session_state['master_df']['Placed_Time'].dt.date.max()
-elif not kpi_history.empty and 'Date' in kpi_history.columns:
-    latest_date = kpi_history['Date'].dt.date.max()
+    try:
+        placed_times = pd.to_datetime(st.session_state['master_df']['Placed_Time'], errors='coerce').dropna()
+        if not placed_times.empty:
+            latest_date = placed_times.dt.date.max()
+    except Exception:
+        latest_date = datetime.date.today()
+elif isinstance(kpi_history, pd.DataFrame) and not kpi_history.empty and 'Date' in kpi_history.columns:
+    try:
+        parsed_dates = pd.to_datetime(kpi_history['Date'], errors='coerce').dropna()
+        if not parsed_dates.empty:
+            latest_date = parsed_dates.dt.date.max()
+    except Exception:
+        latest_date = datetime.date.today()
+
+if pd.isna(latest_date) or not isinstance(latest_date, datetime.date):
+    latest_date = datetime.date.today()
 
 # --- HEADER BAR ---
 col_head, col_mode, col_date, col_ref = st.columns([3.2, 2.3, 2.2, 1.3])
@@ -244,7 +258,7 @@ with col_ref:
 st.markdown("<div style='margin-bottom: 18px;'></div>", unsafe_allow_html=True)
 
 def resolve_dates(d_range):
-    if isinstance(d_range, tuple):
+    if isinstance(d_range, (tuple, list)):
         if len(d_range) == 2: return d_range[0], d_range[1]
         elif len(d_range) == 1: return d_range[0], d_range[0]
     return latest_date, latest_date
@@ -287,32 +301,35 @@ if has_live_data:
     region_cpo = (active_riders_cnt * 1050 / delivered_total) if delivered_total > 0 else 0.0
 
 else:
-    if not kpi_history.empty:
-        filtered_hist = kpi_history[
-            (kpi_history['Date'].dt.date >= start_date) & 
-            (kpi_history['Date'].dt.date <= end_date)
-        ].copy()
-        if store_profile_select != "All Regional Stores":
+    if isinstance(kpi_history, pd.DataFrame) and not kpi_history.empty:
+        filtered_hist = kpi_history.copy()
+        if 'Date' in filtered_hist.columns:
+            filtered_hist['Date_Parsed'] = pd.to_datetime(filtered_hist['Date'], errors='coerce').dt.date
+            filtered_hist = filtered_hist[
+                (filtered_hist['Date_Parsed'] >= start_date) & 
+                (filtered_hist['Date_Parsed'] <= end_date)
+            ]
+        if store_profile_select != "All Regional Stores" and 'Store_Name' in filtered_hist.columns:
             filtered_hist = filtered_hist[filtered_hist['Store_Name'] == store_profile_select]
     else:
         filtered_hist = pd.DataFrame()
 
     if not filtered_hist.empty:
-        exp_orders = int(filtered_hist['Express_Orders'].sum())
-        std_orders = int(filtered_hist['Standard_Orders'].sum())
-        delivered_total = int(filtered_hist['Total_Delivered'].sum())
+        exp_orders = int(filtered_hist['Express_Orders'].sum()) if 'Express_Orders' in filtered_hist.columns else 0
+        std_orders = int(filtered_hist['Standard_Orders'].sum()) if 'Standard_Orders' in filtered_hist.columns else 0
+        delivered_total = int(filtered_hist['Total_Delivered'].sum()) if 'Total_Delivered' in filtered_hist.columns else 0
         tot_placed_orders = exp_orders + std_orders
         
         self_deliv_cnt = int(filtered_hist['Self_Delivered'].sum()) if 'Self_Delivered' in filtered_hist.columns else 0
         tpl_deliv_cnt = int(filtered_hist['3PL_Delivered'].sum()) if '3PL_Delivered' in filtered_hist.columns else 0
         
-        exp_pack_pct = filtered_hist['Express_Packed_SLA'].mean()
-        exp_disp_pct = filtered_hist['Express_Dispatch_SLA'].mean()
+        exp_pack_pct = filtered_hist['Express_Packed_SLA'].mean() if 'Express_Packed_SLA' in filtered_hist.columns else 0.0
+        exp_disp_pct = filtered_hist['Express_Dispatch_SLA'].mean() if 'Express_Dispatch_SLA' in filtered_hist.columns else 0.0
         exp_del_pct = filtered_hist['Express_Delivery_SLA'].mean() if 'Express_Delivery_SLA' in filtered_hist.columns else 0.0
         std_del_pct = filtered_hist['Standard_Delivery_SLA'].mean() if 'Standard_Delivery_SLA' in filtered_hist.columns else 0.0
         
-        active_riders_cnt = int(filtered_hist['Active_Riders'].sum())
-        region_cpo = filtered_hist['Store_CPO'].mean()
+        active_riders_cnt = int(filtered_hist['Active_Riders'].sum()) if 'Active_Riders' in filtered_hist.columns else 0
+        region_cpo = filtered_hist['Store_CPO'].mean() if 'Store_CPO' in filtered_hist.columns else 0.0
     else:
         tot_placed_orders, exp_orders, std_orders, delivered_total, self_deliv_cnt, tpl_deliv_cnt = 0, 0, 0, 0, 0, 0
         exp_pack_pct, exp_disp_pct, exp_del_pct, std_del_pct, active_riders_cnt, region_cpo = 0.0, 0.0, 0.0, 0.0, 0, 0.0
@@ -453,10 +470,10 @@ if selected_view_mode == "Store Level View":
         st.dataframe(pd.DataFrame(store_rows), hide_index=True, use_container_width=True)
     
     else:
-        if not filtered_hist.empty:
+        if isinstance(filtered_hist, pd.DataFrame) and not filtered_hist.empty:
             display_hist = filtered_hist.copy()
-            if 'Date' in display_hist.columns:
-                display_hist['Date'] = display_hist['Date'].dt.strftime('%Y-%m-%d')
+            if 'Date_Parsed' in display_hist.columns:
+                display_hist = display_hist.drop(columns=['Date_Parsed'])
             st.dataframe(display_hist, hide_index=True, use_container_width=True)
         else:
             st.info("No store performance data available for this date range.")
@@ -522,7 +539,7 @@ with t3:
     st.subheader("📋 Manager Audit - Submitted Store Remarks")
     audit_db = load_saved_remarks()
     
-    if not audit_db.empty:
+    if isinstance(audit_db, pd.DataFrame) and not audit_db.empty:
         if 'Timestamp' in audit_db.columns and pd.api.types.is_datetime64_any_dtype(audit_db['Timestamp']):
             audit_filtered = audit_db[
                 (audit_db['Timestamp'].dt.date >= start_date) & 
@@ -531,7 +548,7 @@ with t3:
         else:
             audit_filtered = audit_db
             
-        if store_profile_select != "All Regional Stores":
+        if store_profile_select != "All Regional Stores" and 'Store_Name' in audit_filtered.columns:
             audit_filtered = audit_filtered[audit_filtered['Store_Name'] == store_profile_select]
             
         if not audit_filtered.empty:
@@ -553,7 +570,6 @@ if has_live_data:
             tot_c = len(r_group)
             
             exp_r_group = r_group[r_group['Order_Type_Clean'] == 'express']
-            # Defensive check for transit duration column
             avg_transit = exp_r_group['Transit_Duration_Min'].mean() if ('Transit_Duration_Min' in exp_r_group.columns and len(exp_r_group) > 0) else 0.0
             r_cpo = round(1050.0 / tot_c, 2) if tot_c > 0 else 0.0
             
