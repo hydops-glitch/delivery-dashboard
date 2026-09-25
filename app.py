@@ -482,8 +482,8 @@ if has_live_data:
                 ca, cb, cc, cd, ce, cf = st.columns([2, 1.5, 2, 2, 3, 1.5])
                 ca.write(f"**{row['Order_ID']}**")
                 cb.write(row['Store_Name'])
-                cc.write(f"Pick: {row['Pick_Duration_Formatted']}")
-                cd.write(f"Dispatch: {row['Dispatch_Duration_Formatted']}")
+                cc.write(f"Pick: {row.get('Pick_Duration_Formatted', 'N/A')}")
+                cd.write(f"Dispatch: {row.get('Dispatch_Duration_Formatted', 'N/A')}")
                 r_in = ce.text_input("Delay Reason", key=f"pd_reason_{row['Order_ID']}", placeholder="Reason...")
                 if cf.button("Submit", key=f"pd_btn_{row['Order_ID']}"):
                     if r_in.strip() != "":
@@ -505,12 +505,12 @@ if has_live_data:
                 ca, cb, cc, cd, ce, cf = st.columns([2, 1.5, 1.5, 2, 3, 1.5])
                 ca.write(f"**{row['Order_ID']}**")
                 cb.write(row['Store_Name'])
-                cc.write(row['Order_Type'])
-                cd.write(f"Rider: {row['Rider_Name']}")
+                cc.write(row.get('Order_Type', 'Standard'))
+                cd.write(f"Rider: {row.get('Rider_Name', 'Unassigned')}")
                 r_in = ce.text_input("Delay Reason", key=f"d_reason_{row['Order_ID']}", placeholder="Reason...")
                 if cf.button("Submit", key=f"d_btn_{row['Order_ID']}"):
                     if r_in.strip() != "":
-                        if append_saved_remark(row['Order_ID'], row['Store_Name'], "Delivery Delay", row['Order_Type'], r_in.strip(), display_identity):
+                        if append_saved_remark(row['Order_ID'], row['Store_Name'], "Delivery Delay", row.get('Order_Type', 'Standard'), r_in.strip(), display_identity):
                             st.success(f"Remark saved! Order {row['Order_ID']} removed from queue.")
                             st.rerun()
                 st.divider()
@@ -553,7 +553,8 @@ if has_live_data:
             tot_c = len(r_group)
             
             exp_r_group = r_group[r_group['Order_Type_Clean'] == 'express']
-            avg_transit = exp_r_group['Transit_Duration_Min'].mean() if len(exp_r_group) > 0 else 0.0
+            # Defensive check for transit duration column
+            avg_transit = exp_r_group['Transit_Duration_Min'].mean() if ('Transit_Duration_Min' in exp_r_group.columns and len(exp_r_group) > 0) else 0.0
             r_cpo = round(1050.0 / tot_c, 2) if tot_c > 0 else 0.0
             
             rider_summary.append({
@@ -567,3 +568,5 @@ if has_live_data:
             
         if rider_summary:
             st.dataframe(pd.DataFrame(rider_summary), hide_index=True, use_container_width=True)
+        else:
+            st.info("No rider breakdown available for selected dataset.")
