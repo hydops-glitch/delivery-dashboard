@@ -10,8 +10,6 @@ def format_duration(seconds):
     return f"{mins} Min {secs:02d} Sec"
 
 def read_file_safely(file):
-    """Robust file reader handling .xlsx, .xls, CSV, and varied text encodings."""
-    # Read bytes once so we can retry parsing
     if hasattr(file, 'read'):
         content = file.read()
         if hasattr(file, 'seek'):
@@ -19,15 +17,13 @@ def read_file_safely(file):
     else:
         content = file
 
-    # 1. Try reading as standard Excel (.xlsx / .xls)
     try:
         return pd.read_excel(io.BytesIO(content))
     except Exception:
         pass
 
-    # 2. Try CSV/TSV with various encodings & separators
     encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
-    separators = [None, '\t', ',', ';'] # None lets pandas auto-detect
+    separators = [None, '\t', ',', ';']
 
     for enc in encodings:
         for sep in separators:
@@ -36,12 +32,11 @@ def read_file_safely(file):
                     df = pd.read_csv(io.BytesIO(content), encoding=enc, engine='python')
                 else:
                     df = pd.read_csv(io.BytesIO(content), encoding=enc, sep=sep)
-                if df.shape[1] > 1: # Successfully split into columns
+                if df.shape[1] > 1:
                     return df
             except Exception:
                 continue
 
-    # Final fallback
     return pd.read_csv(io.BytesIO(content), encoding='latin-1', on_bad_lines='skip')
 
 def process_and_merge_reports(picklist_files_list, transactions_file_path):
@@ -80,8 +75,17 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     if 'ID' in trans_clean.columns:
         trans_clean.rename(columns={'ID': 'Order_ID'}, inplace=True)
     
-    # Merge Picklist and Transactions
-    master_df = pd.merge(pick_agg, trans_clean, on='Order_ID', how='inner')
+    # Identify Column C or Status Column
+    status_col = trans_clean.columns[2] if len(trans_clean.columns) >= 3 else 'Order State'
+    if 'Order State' in trans_clean.columns:
+        status_col = 'Order State'
+
+    # Filter out PAYMENT FAILED and CANCELLED orders
+    excluded_statuses = ['PAYMENT FAILED', 'CANCELLED']
+    trans_filtered = trans_clean[~trans_clean[status_col].astype(str).str.strip().str.upper().isin(excluded_statuses)].copy()
+
+    # Merge Picklist and Filtered Transactions
+    master_df = pd.merge(pick_agg, trans_filtered, on='Order_ID', how='inner')
     
     # Strip Timezone info & convert to Datetime
     master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Order_Placing_Time']).dt.tz_localize(None)
