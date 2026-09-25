@@ -89,12 +89,12 @@ if picklist_files and transaction_file:
     
     daily_summary = []
     for (order_date, store), group in master_df.groupby([master_df['Order_Placing_Time'].dt.date, 'Store_Name']):
-        exp_group = group[group['Order Type'].str.lower() == 'express']
-        sched_group = group[group['Order Type'].str.lower() != 'express']
+        exp_group = group[group['Order_Type_Clean'] == 'express']
+        sched_group = group[group['Order_Type_Clean'] != 'express']
         
-        exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0
-        exp_del_sla = round((exp_group['On Time Delivered'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0
-        sched_del_sla = round((sched_group['On Time Delivered'].sum() / len(sched_group) * 100), 1) if len(sched_group) > 0 else 0
+        exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+        exp_del_sla = round((exp_group['On Time Delivered'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+        sched_del_sla = round((sched_group['On Time Delivered'].sum() / len(sched_group) * 100), 1) if len(sched_group) > 0 else 0.0
         
         self_cnt = int((group['Rider_Channel'] == 'Self (In-House)').sum())
         tpl_cnt = int((group['Rider_Channel'] == '3PL Partner').sum())
@@ -121,7 +121,7 @@ if picklist_files and transaction_file:
     save_daily_kpis(combined_kpis)
     st.sidebar.success("Reports processed & KPIs saved to Google Sheets!")
 
-# --- ALWAYS-VISIBLE TOP FILTER BAR ---
+# --- TOP FILTER BAR ---
 has_live_data = 'master_df' in st.session_state
 kpi_history = load_saved_kpis()
 
@@ -182,18 +182,18 @@ def filter_kpi_history(df):
         res = res[(res['Date'].dt.date >= selected_date_range[0]) & (res['Date'].dt.date <= selected_date_range[1])]
     return res
 
-# --- HELPER FUNCTION TO GENERATE STORE METRICS TABLE ---
+# --- STORE SUMMARY TABLE BUILDER ---
 def build_store_summary_table(df):
     store_stats = []
     num_days = max(df['Order_Placing_Time'].dt.date.nunique(), 1)
     
     for store, group in df.groupby('Store_Name'):
-        exp_group = group[group['Order Type'].str.lower() == 'express']
-        sched_group = group[group['Order Type'].str.lower() != 'express']
+        exp_group = group[group['Order_Type_Clean'] == 'express']
+        sched_group = group[group['Order_Type_Clean'] != 'express']
         
-        exp_pack_pct = (exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0
-        exp_del_pct = (exp_group['On Time Delivered'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0
-        sched_del_pct = (sched_group['On Time Delivered'].sum() / len(sched_group) * 100) if len(sched_group) > 0 else 0
+        exp_pack_pct = (exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0.0
+        exp_del_pct = (exp_group['On Time Delivered'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0.0
+        sched_del_pct = (sched_group['On Time Delivered'].sum() / len(sched_group) * 100) if len(sched_group) > 0 else 0.0
         
         tot_avg = round(len(group) / num_days)
         self_avg = round((group['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
@@ -210,7 +210,7 @@ def build_store_summary_table(df):
         })
     return pd.DataFrame(store_stats)
 
-# --- LIVE DATA VIEW ---
+# --- LIVE DATA DISPLAY ---
 if has_live_data:
     master_df = st.session_state['master_df']
     filtered_df = master_df.copy()
@@ -240,12 +240,12 @@ if has_live_data:
 
     st.markdown("---")
 
-    exp_df = filtered_df[filtered_df['Order Type'].str.lower() == 'express']
-    sched_df = filtered_df[filtered_df['Order Type'].str.lower() != 'express']
+    exp_df = filtered_df[filtered_df['Order_Type_Clean'] == 'express']
+    sched_df = filtered_df[filtered_df['Order_Type_Clean'] != 'express']
     
-    exp_packed_pct = (exp_df['Pick_SLA_Met'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0
-    exp_del_pct = (exp_df['On Time Delivered'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0
-    sched_del_pct = (sched_df['On Time Delivered'].sum() / len(sched_df) * 100) if len(sched_df) > 0 else 0
+    exp_packed_pct = (exp_df['Pick_SLA_Met'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0.0
+    exp_del_pct = (exp_df['On Time Delivered'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0.0
+    sched_del_pct = (sched_df['On Time Delivered'].sum() / len(sched_df) * 100) if len(sched_df) > 0 else 0.0
     
     num_days = max((filtered_df['Order_Placing_Time'].dt.date.nunique()), 1)
     tot_avg = round(len(filtered_df) / num_days)
@@ -327,7 +327,7 @@ if has_live_data:
         else:
             st.info("No saved remarks found in Google Sheets yet.")
 
-# --- HISTORICAL VIEW (DEFAULT LANDING VIEW) ---
+# --- HISTORICAL DATA DISPLAY ---
 else:
     st.title("🌐 Delivery & Fulfillment Historical Performance")
     st.info("💡 Displaying historical performance trends from Google Sheets. Upload fresh daily reports via the sidebar to process new orders.")
@@ -340,9 +340,9 @@ else:
 
         st.subheader("📈 Persistent Performance Metrics")
         
-        exp_pack_avg = filtered_kpi['Express_Packed_SLA'].mean() if not filtered_kpi.empty else 0
-        exp_del_avg = filtered_kpi['Express_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
-        sched_del_avg = filtered_kpi['Scheduled_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
+        exp_pack_avg = filtered_kpi['Express_Packed_SLA'].mean() if not filtered_kpi.empty else 0.0
+        exp_del_avg = filtered_kpi['Express_Delivered_SLA'].mean() if not filtered_kpi.empty else 0.0
+        sched_del_avg = filtered_kpi['Scheduled_Delivered_SLA'].mean() if not filtered_kpi.empty else 0.0
         
         tot_vol = filtered_kpi['Total_Orders'].sum() if not filtered_kpi.empty else 0
         self_vol = filtered_kpi['Self_Orders'].sum() if not filtered_kpi.empty else 0
