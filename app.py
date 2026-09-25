@@ -159,7 +159,7 @@ with col_picker:
     else:
         selected_date_range = st.date_input(
             "Select Date Range", 
-            value=(datetime.date.today() - datetime.timedelta(days=7), datetime.date.today())
+            value=(datetime.date.today(), datetime.date.today())
         )
 
 # Helper function to filter historical Google Sheets KPI dataframe
