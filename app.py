@@ -105,6 +105,8 @@ if picklist_files and transaction_file:
             'Express_Packed_SLA': exp_pack_sla,
             'Express_Delivered_SLA': exp_del_sla,
             'Scheduled_Delivered_SLA': sched_del_sla,
+            'Express_Orders': len(exp_group),
+            'Scheduled_Orders': len(sched_group),
             'Self_Orders': self_cnt,
             'TPL_Orders': tpl_cnt,
             'Total_Orders': len(group)
@@ -182,10 +184,9 @@ def filter_kpi_history(df):
         res = res[(res['Date'].dt.date >= selected_date_range[0]) & (res['Date'].dt.date <= selected_date_range[1])]
     return res
 
-# --- STORE SUMMARY TABLE BUILDER ---
+# --- EXACT DATA STORE SUMMARY TABLE BUILDER ---
 def build_store_summary_table(df):
     store_stats = []
-    num_days = max(df['Order_Placing_Time'].dt.date.nunique(), 1)
     
     for store, group in df.groupby('Store_Name'):
         exp_group = group[group['Order_Type_Clean'] == 'express']
@@ -195,18 +196,22 @@ def build_store_summary_table(df):
         exp_del_pct = (exp_group['On Time Delivered'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0.0
         sched_del_pct = (sched_group['On Time Delivered'].sum() / len(sched_group) * 100) if len(sched_group) > 0 else 0.0
         
-        tot_avg = round(len(group) / num_days)
-        self_avg = round((group['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
-        tpl_avg = round((group['Rider_Channel'] == '3PL Partner').sum() / num_days)
+        total_express_cnt = len(exp_group)
+        total_sched_cnt = len(sched_group)
+        total_orders_cnt = len(group)
+        self_cnt = int((group['Rider_Channel'] == 'Self (In-House)').sum())
+        tpl_cnt = int((group['Rider_Channel'] == '3PL Partner').sum())
         
         store_stats.append({
             'Store Name': store,
             'Express Packed SLA (≤3m)': f"{exp_pack_pct:.1f}%",
             'Express Delivered SLA': f"{exp_del_pct:.1f}%",
             'Scheduled Delivered SLA': f"{sched_del_pct:.1f}%",
-            'Avg Total Orders / Day': tot_avg,
-            'Avg Self Orders / Day': self_avg,
-            'Avg 3PL Orders / Day': tpl_avg
+            'Express Orders': total_express_cnt,
+            'Scheduled Orders': total_sched_cnt,
+            'Total Orders': total_orders_cnt,
+            'Self Orders': self_cnt,
+            '3PL Orders': tpl_cnt
         })
     return pd.DataFrame(store_stats)
 
@@ -247,22 +252,21 @@ if has_live_data:
     exp_del_pct = (exp_df['On Time Delivered'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0.0
     sched_del_pct = (sched_df['On Time Delivered'].sum() / len(sched_df) * 100) if len(sched_df) > 0 else 0.0
     
-    num_days = max((filtered_df['Order_Placing_Time'].dt.date.nunique()), 1)
-    tot_avg = round(len(filtered_df) / num_days)
-    self_avg = round((filtered_df['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
-    tpl_avg = round((filtered_df['Rider_Channel'] == '3PL Partner').sum() / num_days)
+    tot_vol = len(filtered_df)
+    self_vol = int((filtered_df['Rider_Channel'] == 'Self (In-House)').sum())
+    tpl_vol = int((filtered_df['Rider_Channel'] == '3PL Partner').sum())
     
     st.subheader("🎯 Region Summary Metrics")
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Express Packed SLA (≤3m)", f"{exp_packed_pct:.1f}%")
     k2.metric("Express Delivered %", f"{exp_del_pct:.1f}%")
     k3.metric("Scheduled Delivered %", f"{sched_del_pct:.1f}%")
-    k4.metric("Avg Daily Orders (Total / Self / 3PL)", f"{tot_avg} / {self_avg} / {tpl_avg}")
+    k4.metric("Total Exact Volume (Total / Self / 3PL)", f"{tot_vol:,} / {self_vol:,} / {tpl_vol:,}")
 
     st.markdown("---")
 
     if selected_view == "All Stores Single View" and not url_store:
-        st.subheader("📊 Store-by-Store Comparison (Single View)")
+        st.subheader("📊 Store-by-Store Exact Performance Breakdown")
         store_comparison_df = build_store_summary_table(filtered_df)
         st.dataframe(store_comparison_df, use_container_width=True)
         st.markdown("---")
