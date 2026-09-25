@@ -10,6 +10,7 @@ def format_duration(seconds):
     return f"{mins} Min {secs:02d} Sec"
 
 def read_file_safely(file):
+    """Robust file reader handling .xlsx, .xls, CSV, and varied text encodings."""
     if hasattr(file, 'read'):
         content = file.read()
         if hasattr(file, 'seek'):
@@ -17,11 +18,13 @@ def read_file_safely(file):
     else:
         content = file
 
+    # 1. Try standard Excel
     try:
         return pd.read_excel(io.BytesIO(content))
     except Exception:
         pass
 
+    # 2. Try CSV/TSV with various encodings
     encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
     separators = [None, '\t', ',', ';']
 
@@ -74,7 +77,7 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     trans_clean = df_trans.copy()
     if 'ID' in trans_clean.columns:
         trans_clean.rename(columns={'ID': 'Order_ID'}, inplace=True)
-    
+        
     # Identify Column C or Status Column
     status_col = trans_clean.columns[2] if len(trans_clean.columns) >= 3 else 'Order State'
     if 'Order State' in trans_clean.columns:
@@ -87,12 +90,16 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     # Merge Picklist and Filtered Transactions
     master_df = pd.merge(pick_agg, trans_filtered, on='Order_ID', how='inner')
     
-    # Strip Timezone info & convert to Datetime
-    master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Order_Placing_Time']).dt.tz_localize(None)
-    master_df['Pick_Confirmed_Time'] = pd.to_datetime(master_df['Pick_Confirmed_Time']).dt.tz_localize(None)
+    # --- DATE MAPPING: PRIORITIZE REQUEST DELIVERY TIME FOR DAILY COUNTS ---
+    if 'Request Delivery Time' in master_df.columns:
+        master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Request Delivery Time'], errors='coerce').dt.tz_localize(None)
+    elif 'Order_Placing_Time' in master_df.columns:
+        master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Order_Placing_Time'], errors='coerce').dt.tz_localize(None)
+        
+    master_df['Pick_Confirmed_Time'] = pd.to_datetime(master_df['Pick_Confirmed_Time'], errors='coerce').dt.tz_localize(None)
     
     if 'Delivered Time' in master_df.columns:
-        master_df['Delivered Time'] = pd.to_datetime(master_df['Delivered Time']).dt.tz_localize(None)
+        master_df['Delivered Time'] = pd.to_datetime(master_df['Delivered Time'], errors='coerce').dt.tz_localize(None)
     
     # 1. Picking Duration Calculation
     master_df['Pick_Duration_Sec'] = (
@@ -112,7 +119,7 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
             break
 
     if dispatch_col:
-        master_df['Dispatch_Time'] = pd.to_datetime(master_df[dispatch_col]).dt.tz_localize(None)
+        master_df['Dispatch_Time'] = pd.to_datetime(master_df[dispatch_col], errors='coerce').dt.tz_localize(None)
         master_df['Dispatch_Duration_Sec'] = (
             (master_df['Dispatch_Time'] - master_df['Pick_Confirmed_Time']).dt.total_seconds()
         ).fillna(0)
