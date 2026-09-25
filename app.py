@@ -166,6 +166,26 @@ with col_picker:
             value=(datetime.date.today(), datetime.date.today())
         )
 
+# --- HELPER: FILTER HISTORICAL DATA ---
+def filter_kpi_history(df):
+    if df.empty or 'Date' not in df.columns:
+        return df
+    res = df.copy()
+    res['Date'] = pd.to_datetime(res['Date'], errors='coerce')
+    
+    if date_filter_mode == "Reporting Cycle" and selected_cycle:
+        if selected_cycle == "Cycle 1 (1st - 7th)":
+            res = res[res['Date'].dt.day.between(1, 7)]
+        elif selected_cycle == "Cycle 2 (8th - 14th)":
+            res = res[res['Date'].dt.day.between(8, 14)]
+        elif selected_cycle == "Cycle 3 (15th - 21st)":
+            res = res[res['Date'].dt.day.between(15, 21)]
+        elif selected_cycle == "Cycle 4 (22nd - End)":
+            res = res[res['Date'].dt.day >= 22]
+    elif date_filter_mode == "Custom Range" and isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
+        res = res[(res['Date'].dt.date >= selected_date_range[0]) & (res['Date'].dt.date <= selected_date_range[1])]
+    return res
+
 # --- LIVE DATA DISPLAY ---
 if has_live_data:
     master_df = st.session_state['master_df']
@@ -336,3 +356,5 @@ else:
     if not kpi_history.empty:
         st.subheader("📋 Historical Store Performance & CPO")
         st.dataframe(filter_kpi_history(kpi_history), use_container_width=True)
+    else:
+        st.warning("No historical performance data saved yet. Upload your first report from the sidebar to store KPIs!")
