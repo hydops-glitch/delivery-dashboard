@@ -1,219 +1,184 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import datetime
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from data_processor import process_and_merge_reports
 
-st.set_page_config(
-    page_title="Hyd Region Performance Dashboard", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
-)
+# Set Streamlit page layout
+st.set_page_config(page_title="Store Operations Dashboard", layout="wide")
 
-st.markdown("""
-<style>
-    .stApp { background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .header-title { font-size: 1.8rem; font-weight: 800; color: #0f172a; margin: 0; }
-    .header-sub { font-size: 0.9rem; color: #64748b; margin-top: 2px; }
-    .saas-card {
-        background-color: #ffffff; border-radius: 12px; padding: 14px 18px;
-        border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.03);
-        margin-bottom: 14px; height: 110px; display: flex; flex-direction: column; justify-content: space-between;
-    }
-    .saas-card-header { display: flex; justify-content: space-between; align-items: center; }
-    .saas-card-title { font-size: 0.78rem; font-weight: 600; color: #64748b; text-transform: capitalize; }
-    .saas-icon-badge { width: 30px; height: 30px; border-radius: 8px; background-color: #eff6ff; display: flex; align-items: center; justify-content: center; font-size: 1rem; }
-    .saas-card-val { font-size: 1.6rem; font-weight: 800; color: #0f172a; line-height: 1; }
-    .saas-card-sub-neutral { font-size: 0.8rem; font-weight: 500; color: #475569; }
-    .saas-card-sub-blue { font-size: 0.8rem; font-weight: 600; color: #2563eb; }
-    .saas-card-sub-gray { font-size: 0.8rem; font-weight: 500; color: #64748b; }
-</style>
-""", unsafe_allow_html=True)
+# ==========================================
+# 1. HELPER FUNCTIONS & METRIC CALCULATIONS
+# ==========================================
 
-# DYNAMIC EVENING / MORNING GREETING
-def get_dynamic_greeting():
-    current_hour = datetime.datetime.now().hour
-    if current_hour < 12: return "Good morning 🌅"
-    elif current_hour < 17: return "Good afternoon ☀️"
-    else: return "Good evening 🌙"
+def parse_zone_minutes(zone_str):
+    """Extracts target SLA minutes directly from Zone/Zone F string."""
+    if pd.isna(zone_str):
+        return 45.0  # Default SLA fallback
+    z = str(zone_str).lower().strip()
+    if '30' in z:
+        return 30.0
+    elif '40' in z:
+        return 40.0
+    elif '60' in z:
+        return 60.0
+    elif '90' in z:
+        return 90.0
+    elif '2.5' in z or '150' in z:
+        return 150.0
+    return 45.0
 
-# Sidebar Setup
-st.sidebar.header("👤 User & Store Profile")
-user_profile_name = st.sidebar.text_input("User / Manager Name", value="J Sreekanth")
-store_profile_select = st.sidebar.selectbox("Active Store Scope", ["All Regional Stores", "TGN_HYD_BHills", "TGN_HYD_HiTech", "TGN_HYD_Manikonda"])
 
-st.sidebar.markdown("---")
-st.sidebar.header("📂 Data Upload")
-uploaded_files = st.sidebar.file_uploader("Upload Order Reports (.xlsx / .csv)", accept_multiple_files=True)
+def process_order_data(df):
+    """Cleans data and computes exact SLA metrics and delivery splits."""
+    # Filter out cancelled / failed orders
+    df_clean = df[~df['Order Status'].isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
 
-if uploaded_files:
-    master_df, errors = process_and_merge_reports(uploaded_files)
-    if errors:
-        st.sidebar.error("❌ Processing Errors:")
-        for err in errors: st.sidebar.error(f"- {err}")
-    elif not master_df.empty:
-        st.session_state['master_df'] = master_df
+    # Parse key datetime columns
+    dt_cols = ['Order date time', 'Placed Time', 'InPicking Time', 'Packed Time', 'Dispatched Time', 'Completed Time']
+    for col in dt_cols:
+        if col in df_clean.columns:
+            df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+
+    # Placed Date for filtering
+    df_clean['Order_Date'] = df_clean['Placed Time'].dt.date
+
+    # Normalize Delivery Partner & classify Self vs 3PL
+    df_clean['Delivery_Partner_Norm'] = df_clean['Delivery Partner'].fillna('').astype(str).str.strip().str.upper()
+    df_clean['Is_Self_Delivered'] = df_clean['Delivery_Partner_Norm'] == 'SELF'
+
+    # Compute Time Durations (in Minutes)
+    # Pick Duration: Placed Time to Packed Time
+    df_clean['Pick_Duration_Mins'] = (df_clean['Packed Time'] - df_clean['Placed Time']).dt.total_seconds() / 60.0
+    df_clean['Pick_SLA_Met'] = df_clean['Pick_Duration_Mins'] <= 3.0
+
+    # Dispatch Duration: Packed Time to Dispatched Time
+    df_clean['Dispatch_Duration_Mins'] = (df_clean['Dispatched Time'] - df_clean['Packed Time']).dt.total_seconds() / 60.0
+    df_clean['Dispatch_SLA_Met'] = df_clean['Dispatch_Duration_Mins'] <= 6.0
+
+    # Zone Target & Total Delivery Duration: Placed Time to Completed Time
+    df_clean['Zone_SLA_Target'] = df_clean['Zone'].apply(parse_zone_minutes)
+    df_clean['Delivery_Duration_Mins'] = (df_clean['Completed Time'] - df_clean['Placed Time']).dt.total_seconds() / 60.0
+    df_clean['Delivery_SLA_Met'] = df_clean['Delivery_Duration_Mins'] <= df_clean['Zone_SLA_Target']
+
+    return df_clean
+
+
+# ==========================================
+# 2. FILE UPLOAD & SIDEBAR CONTROLS
+# ==========================================
+
+st.sidebar.header("User & Store Profile")
+uploaded_file = st.sidebar.file_uploader("Upload Order Reports (.xlsx / .csv)", type=['xlsx', 'csv'])
+
+if uploaded_file is not None:
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            raw_df = pd.read_csv(uploaded_file)
+        else:
+            raw_df = pd.read_excel(uploaded_file)
+
+        df = process_order_data(raw_df)
         st.sidebar.success("Report successfully parsed!")
 
-has_live_data = 'master_df' in st.session_state and not st.session_state['master_df'].empty
+        # Filters
+        available_stores = sorted(df['Store Name'].dropna().unique().tolist())
+        selected_store = st.sidebar.selectbox("Active Store Scope", ["All Stores"] + available_stores)
 
-# AUTO-DETECT LATEST AVAILABLE DATE
-if has_live_data:
-    placed_dates = st.session_state['master_df']['Placed_Time'].dropna().dt.date
-    latest_date = placed_dates.max()
-    earliest_date = placed_dates.min()
+        available_dates = sorted(df['Order_Date'].dropna().unique())
+        selected_date = st.sidebar.date_input("Select Date", value=available_dates[-1] if available_dates else None)
+
+        # Apply Filters
+        filtered_df = df.copy()
+        if selected_store != "All Stores":
+            filtered_df = filtered_df[filtered_df['Store Name'] == selected_store]
+        if selected_date:
+            filtered_df = filtered_df[filtered_df['Order_Date'] == selected_date]
+
+        # Order Type Split
+        express_orders = filtered_df[filtered_df['Order Type'] == 'Express']
+        standard_orders = filtered_df[filtered_df['Order Type'] == 'Standard']
+
+        # ==========================================
+        # 3. METRIC CARDS HEADER
+        # ==========================================
+        st.title("Store Performance Dashboard")
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+
+        total_placed = len(filtered_df)
+        total_delivered = len(filtered_df[filtered_df['Order Status'] == 'DELIVERED'])
+        m1.metric("Total Orders", f"{total_placed}", f"Delivered: {total_delivered}")
+
+        # Pick SLA
+        pick_pct = (express_orders['Pick_SLA_Met'].mean() * 100) if len(express_orders) > 0 else 0.0
+        m2.metric("Express Pick SLA", f"{pick_pct:.1f}%", f"{express_orders['Pick_SLA_Met'].sum()}/{len(express_orders)} Met (<=3m)")
+
+        # Dispatch SLA
+        dispatch_pct = (express_orders['Dispatch_SLA_Met'].mean() * 100) if len(express_orders) > 0 else 0.0
+        m3.metric("Express Dispatch SLA", f"{dispatch_pct:.1f}%", f"{express_orders['Dispatch_SLA_Met'].sum()}/{len(express_orders)} Met (<=6m)")
+
+        # Express Delivery SLA
+        exp_del_pct = (express_orders['Delivery_SLA_Met'].mean() * 100) if len(express_orders) > 0 else 0.0
+        m4.metric("Express Delivery SLA", f"{exp_del_pct:.1f}%", f"{len(express_orders)} Express orders")
+
+        # Standard Delivery SLA
+        std_del_pct = (standard_orders['Delivery_SLA_Met'].mean() * 100) if len(standard_orders) > 0 else 0.0
+        m5.metric("Standard Delivery SLA", f"{std_del_pct:.1f}%", f"{len(standard_orders)} Standard orders")
+
+        st.divider()
+
+        # Volume Split Cards
+        c1, c2 = st.columns(2)
+
+        self_count = filtered_df['Is_Self_Delivered'].sum()
+        tpl_count = len(filtered_df) - self_count
+        active_riders = filtered_df['Rider Name'].dropna().nunique()
+
+        c1.subheader("Riders & Self Delivery")
+        c1.write(f"**Self Riders Delivered:** {self_count} | **Active Riders:** {active_riders}")
+
+        c2.subheader("Orders Volume Split")
+        c2.write(f"**{len(express_orders)}** Exp | **{len(standard_orders)}** Standard")
+        c2.write(f"Self Delivered: **{self_count}** | 3PL Delivered: **{tpl_count}**")
+
+        st.divider()
+
+        # ==========================================
+        # 4. STORE LEVEL BREAKDOWN TABLE
+        # ==========================================
+        st.subheader("📊 Store Level Performance Breakdown")
+
+        summary_table = filtered_df.groupby(['Order_Date', 'Store Name']).apply(lambda g: pd.Series({
+            'Express_Packed_SLA': f"{(g[g['Order Type']=='Express']['Pick_SLA_Met'].mean()*100):.1f}%" if len(g[g['Order Type']=='Express']) > 0 else "N/A",
+            'Express_Dispatch_SLA': f"{(g[g['Order Type']=='Express']['Dispatch_SLA_Met'].mean()*100):.1f}%" if len(g[g['Order Type']=='Express']) > 0 else "N/A",
+            'Express_Delivery_SLA': f"{(g[g['Order Type']=='Express']['Delivery_SLA_Met'].mean()*100):.1f}%" if len(g[g['Order Type']=='Express']) > 0 else "N/A",
+            'Standard_Delivery_SLA': f"{(g[g['Order Type']=='Standard']['Delivery_SLA_Met'].mean()*100):.1f}%" if len(g[g['Order Type']=='Standard']) > 0 else "N/A",
+            'Express_Orders': (g['Order Type'] == 'Express').sum(),
+            'Standard_Orders': (g['Order Type'] == 'Standard').sum(),
+            'Total_Delivered': (g['Order Status'] == 'DELIVERED').sum(),
+            'Self_Delivered': g['Is_Self_Delivered'].sum(),
+            '3PL_Delivered': (~g['Is_Self_Delivered']).sum()
+        })).reset_index()
+
+        st.dataframe(summary_table, hide_index=True, use_container_width=True)
+
+        st.divider()
+
+        # ==========================================
+        # 5. DELIVERY BREACHES TABLE (FIXED CODE)
+        # ==========================================
+        st.subheader("⚠️ Delivery Breach Details")
+
+        del_breach = filtered_df[filtered_df['Delivery_SLA_Met'] == False][
+            ['Order ID', 'Store Name', 'Order Type', 'Zone', 'Placed Time', 'Completed Time', 'Delivery_Duration_Mins', 'Zone_SLA_Target', 'Delivery Partner']
+        ].copy()
+
+        # FIX: Explicit if/else statement eliminates the returned DeltaGenerator object
+        if not del_breach.empty:
+            st.dataframe(del_breach, hide_index=True, use_container_width=True)
+        else:
+            st.success("No Delivery Breaches!")
+
+    except Exception as e:
+        st.error(f"Error processing file: {e}")
 else:
-    latest_date = datetime.date.today()
-    earliest_date = datetime.date.today()
-
-# Top Header Controls
-col_head, col_mode, col_date, col_ref = st.columns([3.2, 2.3, 2.2, 1.3])
-greeting_str = get_dynamic_greeting()
-
-with col_head:
-    st.markdown(f'<div class="header-title">{greeting_str}, {user_profile_name}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="header-sub">Here\'s what\'s happening with your business today.</div>', unsafe_allow_html=True)
-
-with col_mode:
-    selected_view_mode = st.selectbox("Select View Mode", ["Overall Region View", "Store Level View"], index=1, label_visibility="collapsed")
-
-with col_date:
-    selected_date_range = st.date_input("Filter Date", value=(latest_date, latest_date), min_value=earliest_date, max_value=latest_date, label_visibility="collapsed")
-
-with col_ref:
-    if st.button("🔄 Refresh All", use_container_width=True): st.rerun()
-
-st.markdown("<div style='margin-bottom: 18px;'></div>", unsafe_allow_html=True)
-
-# Process Active Filtered Data
-if has_live_data:
-    df_active = st.session_state['master_df']
-    if store_profile_select != "All Regional Stores":
-        df_active = df_active[df_active['Store_Name'] == store_profile_select]
-
-    start_d = selected_date_range[0] if isinstance(selected_date_range, (tuple, list)) else selected_date_range
-    end_d = selected_date_range[1] if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) > 1 else start_d
-
-    filtered_df = df_active[(df_active['Placed_Time'].dt.date >= start_d) & (df_active['Placed_Time'].dt.date <= end_d)].copy()
-
-    exp_df = filtered_df[filtered_df['Order_Type_Clean'] == 'express']
-    std_df = filtered_df[filtered_df['Order_Type_Clean'] != 'express']
-
-    tot_placed_orders = len(filtered_df)
-    exp_orders = len(exp_df)
-    std_orders = len(std_df)
-
-    deliv_all = filtered_df[filtered_df['Order_Status'] == 'DELIVERED']
-    delivered_total = len(deliv_all)
-    self_deliv_cnt = len(deliv_all[deliv_all['Fulfillment_Type'] == 'Self'])
-    tpl_deliv_cnt = len(deliv_all[deliv_all['Fulfillment_Type'] == '3PL'])
-
-    exp_pack_pct = (exp_df['Pick_SLA_Met'].dropna().mean() * 100) if not exp_df['Pick_SLA_Met'].dropna().empty else 0.0
-    exp_disp_pct = (exp_df['Dispatch_SLA_Met'].dropna().mean() * 100) if not exp_df['Dispatch_SLA_Met'].dropna().empty else 0.0
-
-    deliv_exp = exp_df[exp_df['Order_Status'] == 'DELIVERED']
-    deliv_std = std_df[std_df['Order_Status'] == 'DELIVERED']
-
-    exp_del_pct = (deliv_exp['On_Time_Delivered'].dropna().mean() * 100) if not deliv_exp['On_Time_Delivered'].dropna().empty else 0.0
-    std_del_pct = (deliv_std['On_Time_Delivered'].dropna().mean() * 100) if not deliv_std['On_Time_Delivered'].dropna().empty else 0.0
-
-    active_riders_cnt = filtered_df[filtered_df['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
-    region_cpo = (active_riders_cnt * 1050 / delivered_total) if delivered_total > 0 else 0.0
-else:
-    tot_placed_orders, exp_orders, std_orders, delivered_total, self_deliv_cnt, tpl_deliv_cnt = 0, 0, 0, 0, 0, 0
-    exp_pack_pct, exp_disp_pct, exp_del_pct, std_del_pct, active_riders_cnt, region_cpo = 0.0, 0.0, 0.0, 0.0, 0, 0.0
-    filtered_df = pd.DataFrame()
-
-# KPI Cards
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Total Orders</span><div class="saas-icon-badge">🛒</div></div><div class="saas-card-val">{tot_placed_orders:,}</div><div class="saas-card-sub-gray">Delivered: {delivered_total} | Placed: {tot_placed_orders}</div></div>', unsafe_allow_html=True)
-with c2: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Express Pick SLA</span><div class="saas-icon-badge">⚡</div></div><div class="saas-card-val">{exp_pack_pct:.1f}%</div><div class="saas-card-sub-gray">Pick compliance</div></div>', unsafe_allow_html=True)
-with c3: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Express Dispatch SLA</span><div class="saas-icon-badge">🚀</div></div><div class="saas-card-val">{exp_disp_pct:.1f}%</div><div class="saas-card-sub-gray">Dispatch compliance</div></div>', unsafe_allow_html=True)
-with c4: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Express Delivery SLA</span><div class="saas-icon-badge">🚚</div></div><div class="saas-card-val">{exp_del_pct:.1f}%</div><div class="saas-card-sub-blue">Express orders</div></div>', unsafe_allow_html=True)
-with c5: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Standard Delivery SLA</span><div class="saas-icon-badge">📦</div></div><div class="saas-card-val">{std_del_pct:.1f}%</div><div class="saas-card-sub-blue">Standard orders</div></div>', unsafe_allow_html=True)
-
-rc1, rc2 = st.columns(2)
-with rc1: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Riders & Region CPO</span><div class="saas-icon-badge">🏍️</div></div><div class="saas-card-val">₹{region_cpo:.2f}</div><div class="saas-card-sub-neutral">Self Riders Delivered: {self_deliv_cnt} | Active Riders: {active_riders_cnt}</div></div>', unsafe_allow_html=True)
-with rc2: st.markdown(f'<div class="saas-card"><div class="saas-card-header"><span class="saas-card-title">Orders Volume Split</span><div class="saas-icon-badge">📊</div></div><div class="saas-card-val">{exp_orders:,} <span style="font-size:1.1rem; color:#64748b; font-weight:500;">Exp</span> &nbsp;|&nbsp; {std_orders:,} <span style="font-size:1.1rem; color:#64748b; font-weight:500;">Standard</span></div><div class="saas-card-sub-neutral">Self Delivered: {self_deliv_cnt} | 3PL Delivered: {tpl_deliv_cnt}</div></div>', unsafe_allow_html=True)
-
-st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
-
-# Store Level View
-if selected_view_mode == "Store Level View" and has_live_data:
-    st.subheader("📊 Hyd Store Level Performance Breakdown")
-    store_rows = []
-    for (order_date, store), s_group in filtered_df.groupby([filtered_df['Placed_Time'].dt.date, 'Store_Name']):
-        s_exp = s_group[s_group['Order_Type_Clean'] == 'express']
-        s_std = s_group[s_group['Order_Type_Clean'] != 'express']
-        s_deliv_exp = s_exp[s_exp['Order_Status'] == 'DELIVERED']
-        s_deliv_std = s_std[s_std['Order_Status'] == 'DELIVERED']
-
-        p_pack = round((s_exp['Pick_SLA_Met'].dropna().mean() * 100), 1) if not s_exp['Pick_SLA_Met'].dropna().empty else 0.0
-        p_disp = round((s_exp['Dispatch_SLA_Met'].dropna().mean() * 100), 1) if not s_exp['Dispatch_SLA_Met'].dropna().empty else 0.0
-        p_del_exp = round((s_deliv_exp['On_Time_Delivered'].dropna().mean() * 100), 1) if not s_deliv_exp['On_Time_Delivered'].dropna().empty else 0.0
-        p_del_std = round((s_deliv_std['On_Time_Delivered'].dropna().mean() * 100), 1) if not s_deliv_std['On_Time_Delivered'].dropna().empty else 0.0
-
-        s_deliv_group = s_group[s_group['Order_Status'] == 'DELIVERED']
-        s_self_deliv = len(s_deliv_group[s_deliv_group['Fulfillment_Type'] == 'Self'])
-        s_3pl_deliv = len(s_deliv_group[s_deliv_group['Fulfillment_Type'] == '3PL'])
-
-        s_riders = s_group[s_group['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
-        s_deliv_tot = len(s_deliv_group)
-        s_cpo = round((s_riders * 1050) / s_deliv_tot, 2) if s_deliv_tot > 0 else 0.0
-
-        store_rows.append({
-            'Date': str(order_date),
-            'Store_Name': store,
-            'Express_Packed_SLA': f"{p_pack}%",
-            'Express_Dispatch_SLA': f"{p_disp}%",
-            'Express_Delivery_SLA': f"{p_del_exp}%",
-            'Standard_Delivery_SLA': f"{p_del_std}%",
-            'Express_Orders': len(s_exp),
-            'Standard_Orders': len(s_std),
-            'Total_Delivered': s_deliv_tot,
-            'Self_Delivered': s_self_deliv,
-            '3PL_Delivered': s_3pl_deliv,
-            'Active_Riders': s_riders,
-            'Store_CPO': f"₹{s_cpo:.2f}"
-        })
-    st.dataframe(pd.DataFrame(store_rows), hide_index=True, use_container_width=True)
-
-# Tabs with Delay Minutes & Rider/3PL Performance
-st.markdown("<br>", unsafe_allow_html=True)
-t1, t2, t3 = st.tabs(["⚡ Express Breaches (Delay Min Included)", "🚚 Delivery Breaches", "🏍️ Rider & 3PL Performance Breakdown"])
-
-if has_live_data:
-    with t1:
-        pick_breach = filtered_df[filtered_df['Pick_SLA_Met'] == 0][['Order_ID', 'Store_Name', 'Order_Type', 'Pick_Delay_Min']].copy()
-        pick_breach['Pick_Delay_Min'] = pick_breach['Pick_Delay_Min'].apply(lambda x: f"{x:.1f} Mins" if pd.notna(x) else "N/A")
-        st.write("### Pick SLA Breaches")
-        st.dataframe(pick_breach, hide_index=True, use_container_width=True) if not pick_breach.empty else st.success("No Pick Breaches!")
-
-    with t2:
-        del_breach = filtered_df[filtered_df['On_Time_Delivered'] == 0][['Order_ID', 'Store_Name', 'Order_Type', 'Rider_Name', 'Fulfillment_Type', 'Delivery_Delay_Min']].copy()
-        del_breach['Delivery_Delay_Min'] = del_breach['Delivery_Delay_Min'].apply(lambda x: f"{x:.1f} Mins" if pd.notna(x) else "N/A")
-        st.write("### Delivery SLA Breaches")
-        st.dataframe(del_breach, hide_index=True, use_container_width=True) if not del_breach.empty else st.success("No Delivery Breaches!")
-
-    with t3:
-        st.write("### Rider & 3PL Performance Summary")
-        rider_df = filtered_df[filtered_df['Order_Status'] == 'DELIVERED'].copy()
-        r_summary = []
-        for rider, r_group in rider_df.groupby('Rider_Name'):
-            if rider == 'Unassigned': continue
-            e_cnt = int((r_group['Order_Type_Clean'] == 'express').sum())
-            s_cnt = int((r_group['Order_Type_Clean'] != 'express').sum())
-            tot_c = len(r_group)
-            avg_del_time = r_group['Delivery_Delay_Min'].mean()
-            r_type = r_group['Fulfillment_Type'].iloc[0]
-            r_summary.append({
-                'Rider / Partner Name': rider,
-                'Fulfillment Type': r_type,
-                'Express Delivered': e_cnt,
-                'Standard Delivered': s_cnt,
-                'Total Delivered': tot_c,
-                'Avg Delivery Duration': f"{avg_del_time:.1f} Mins" if pd.notna(avg_del_time) else "N/A"
-            })
-        st.dataframe(pd.DataFrame(r_summary).sort_values(by='Total Delivered', ascending=False), hide_index=True, use_container_width=True)
+    st.info("Please upload an order transitions file (.xlsx or .csv) from the sidebar to view metrics.")
