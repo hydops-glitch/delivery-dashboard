@@ -4,19 +4,25 @@ import numpy as np
 def process_and_merge_reports(file_list):
     dfs = []
     for f in file_list:
-        if f.name.endswith('.csv'):
-            temp = pd.read_csv(f)
-        else:
-            temp = pd.read_excel(f)
-        dfs.append(temp)
+        try:
+            if f.name.endswith('.csv'):
+                temp = pd.read_csv(f)
+            else:
+                temp = pd.read_excel(f)
+            dfs.append(temp)
+        except Exception:
+            continue
+            
+    if not dfs:
+        return pd.DataFrame()
     
     df = pd.concat(dfs, ignore_index=True)
     
     # Standardize column names (strip whitespace & replace spaces/dots)
-    df.columns = [c.strip().replace(' ', '_').replace('.', '_') for c in df.columns]
+    df.columns = [str(c).strip().replace(' ', '_').replace('.', '_') for c in df.columns]
     
-    # Flexible column map for standard variations
-    col_map = {c.lower(): c for c in df.columns}
+    # Lowercase lookup map
+    col_map = {str(c).lower(): c for c in df.columns}
     
     # Date parsing
     date_col = next((col_map[k] for k in col_map if any(x in k for x in ['placed', 'order_date', 'created', 'date'])), None)
@@ -78,10 +84,10 @@ def process_and_merge_reports(file_list):
     else:
         df['On_Time_Delivered'] = 1
 
-    # Safe Transit Duration Column
+    # Defensive Transit Duration Column
     transit_col = next((col_map[k] for k in col_map if 'transit' in k or 'delivery_time' in k or 'duration' in k), None)
     if transit_col and pd.api.types.is_numeric_dtype(df[transit_col]):
-        df['Transit_Duration_Min'] = df[transit_col]
+        df['Transit_Duration_Min'] = pd.to_numeric(df[transit_col], errors='coerce').fillna(0.0)
     else:
         df['Transit_Duration_Min'] = 0.0
 
@@ -96,7 +102,7 @@ def process_and_merge_reports(file_list):
         id_col = next((col_map[k] for k in col_map if 'id' in k or 'number' in k or 'code' in k), None)
         df['Order_ID'] = df[id_col].astype(str) if id_col else [f"ORD_{i}" for i in range(len(df))]
 
-    # Formatting helper columns for breach displays
+    # Formatting helpers
     df['Pick_Duration_Formatted'] = df[pick_col].astype(str) if pick_col else "0m"
     df['Dispatch_Duration_Formatted'] = df[disp_col].astype(str) if disp_col else "0m"
     if 'Order_Type' not in df.columns:
