@@ -45,17 +45,24 @@ def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reas
         st.error(f"Error saving remark: {e}")
         return False
 
-# --- SIDEBAR ---
-st.sidebar.header("📁 Step 1: Upload Daily Data")
+# --- SIDEBAR UPLOADER ---
+st.sidebar.header("📂 Data Controls")
+st.sidebar.markdown("Upload fresh reports to analyze new daily orders.")
+
 picklist_files = st.sidebar.file_uploader("Upload Store Picklist Reports (.xls/.csv)", accept_multiple_files=True)
 transaction_file = st.sidebar.file_uploader("Upload Order Transactions Report (.xlsx/.csv)")
 
 saved_db = load_saved_remarks()
 saved_order_ids = set(saved_db['Order_ID'].astype(str).unique()) if not saved_db.empty else set()
 
+# Process uploaded files if available
 if picklist_files and transaction_file:
-    master_df = process_and_merge_reports(picklist_files, transaction_file)
-    st.sidebar.success("Reports processed successfully!")
+    st.session_state['master_df'] = process_and_merge_reports(picklist_files, transaction_file)
+    st.sidebar.success("Fresh data processed successfully!")
+
+# Check if data exists in Session State or Google Sheets
+if 'master_df' in st.session_state:
+    master_df = st.session_state['master_df']
     
     # --- TOP ROW CONTROLS ---
     col_store, col_filter_type, col_picker = st.columns([2, 2, 3])
@@ -110,33 +117,27 @@ if picklist_files and transaction_file:
     exp_df = filtered_df[filtered_df['Order Type'].str.lower() == 'express']
     sched_df = filtered_df[filtered_df['Order Type'].str.lower() != 'express']
     
-    # 1. Express Packed %
     exp_packed_pct = (exp_df['Pick_SLA_Met'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0
-    # 2. Express Dispatch % (> 6 min considered breach)
-    exp_dispatch_pct = (exp_df['Dispatch_SLA_Met'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0
-    # 3. Express & Scheduled Delivered %
     exp_del_pct = (exp_df['On Time Delivered'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0
     sched_del_pct = (sched_df['On Time Delivered'].sum() / len(sched_df) * 100) if len(sched_df) > 0 else 0
-    # 4. Avg Orders done by Self and 3PL
+    
     num_days = max((filtered_df['Order_Placing_Time'].dt.date.nunique()), 1)
     self_orders_avg = (filtered_df['Rider_Channel'] == 'Self (In-House)').sum() / num_days
     tpl_orders_avg = (filtered_df['Rider_Channel'] == '3PL Partner').sum() / num_days
     
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Express Packed SLA (≤3m)", f"{exp_packed_pct:.1f}%")
-    k2.metric("Express Dispatch SLA (≤6m)", f"{exp_dispatch_pct:.1f}%")
-    k3.metric("Express Delivered %", f"{exp_del_pct:.1f}%")
-    k4.metric("Scheduled Delivered %", f"{sched_del_pct:.1f}%")
-    k5.metric("Avg Orders (Self / 3PL)", f"{self_orders_avg:.0f} / {tpl_orders_avg:.0f} per day")
+    k2.metric("Express Delivered %", f"{exp_del_pct:.1f}%")
+    k3.metric("Scheduled Delivered %", f"{sched_del_pct:.1f}%")
+    k4.metric("Avg Orders (Self / 3PL)", f"{self_orders_avg:.0f} / {tpl_orders_avg:.0f} per day")
 
     st.markdown("---")
 
     # --- TABS FOR REMARKS ---
-    tab_pick, tab_disp, tab_del, tab_mgr = st.tabs([
+    tab_pick, tab_del, tab_mgr = st.tabs([
         "⚡ Express Packing Delays (>3m)", 
-        "🚀 Express Dispatch Delays (>6m)",
         "🚚 Delivery Delays", 
-        "📊 Manager Review"
+        "📊 Manager Review (Saved Remarks)"
     ])
     
     with tab_pick:
@@ -161,29 +162,6 @@ if picklist_files and transaction_file:
                 st.divider()
         else:
             st.success("🎉 Zero pending Express packing delays!")
-
-    with tab_disp:
-        st.subheader("Express Dispatch Breaches (> 6 Min)")
-        exp_disp_breached = exp_df[
-            (exp_df['Dispatch_SLA_Met'] == 0) & 
-            (~exp_df['Order_ID'].astype(str).isin(saved_order_ids))
-        ].copy()
-        
-        if not exp_disp_breached.empty:
-            for idx, row in exp_disp_breached.iterrows():
-                c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 2])
-                c1.write(f"**{row['Order_ID']}**")
-                c2.write(row['Store_Name'])
-                c3.write(f"Dispatch Time: {row['Dispatch Duration']}")
-                reason_input = c4.text_input("Reason", key=f"disp_reason_{row['Order_ID']}", placeholder="Enter dispatch delay reason...")
-                if c5.button("Submit & Hide", key=f"disp_btn_{row['Order_ID']}"):
-                    if reason_input.strip() != "":
-                        if append_saved_remark(row['Order_ID'], row['Store_Name'], "Express Dispatch Delay", "Express", reason_input.strip()):
-                            st.success(f"Saved: {row['Order_ID']}")
-                            st.rerun()
-                st.divider()
-        else:
-            st.success("🎉 Zero pending Express dispatch delays!")
 
     with tab_del:
         st.subheader("Delivery Breaches (Express & Scheduled)")
@@ -211,14 +189,30 @@ if picklist_files and transaction_file:
 
     with tab_mgr:
         st.subheader("📊 Manager Review (Saved Remarks Audit)")
-        current_remarks = load_saved_remarks()
-        if not current_remarks.empty:
+        if not saved_db.empty:
             if selected_store != 'All Stores (HYD Region)':
-                current_remarks = current_remarks[current_remarks['Store_Name'] == selected_store]
-            st.dataframe(current_remarks, use_container_width=True)
+                display_db = saved_db[saved_db['Store_Name'] == selected_store]
+            else:
+                display_db = saved_db.copy()
+            st.dataframe(display_db, use_container_width=True)
         else:
             st.info("No saved remarks found in Google Sheets yet.")
 
 else:
-    st.title("🚚 Fulfillment & Delivery Performance Dashboard")
-    st.info("👈 Upload your store picklists and transaction report from the sidebar to start.")
+    # --- DEFAULT LANDING PAGE WHEN NO FRESH FILE IS UPLOADED ---
+    st.title("🌐 Delivery & Fulfillment Historical Dashboard")
+    st.info("💡 Showing historical submitted delay remarks. To analyze fresh raw reports, upload files via the sidebar on the left.")
+    
+    st.subheader("📊 Submitted Delay Remarks Database")
+    if not saved_db.empty:
+        st.dataframe(saved_db, use_container_width=True)
+        
+        csv_data = saved_db.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download All Historical Remarks (CSV)",
+            data=csv_data,
+            file_name=f"Historical_Delay_Remarks_{datetime.date.today()}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.write("No historical delay records submitted yet.")
