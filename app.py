@@ -129,9 +129,9 @@ col_view, col_filter_type, col_picker = st.columns([3, 2, 3])
 
 all_stores_list = []
 if has_live_data:
-    all_stores_list = sorted(list(st.session_state['master_df']['Store_Name'].unique()))
+    all_stores_list = sorted(list(st.session_state['master_df']['Store_Name'].dropna().unique()))
 elif not kpi_history.empty and 'Store_Name' in kpi_history.columns:
-    all_stores_list = sorted(list(kpi_history['Store_Name'].unique()))
+    all_stores_list = sorted(list(kpi_history['Store_Name'].dropna().unique()))
 
 if url_store and url_store in all_stores_list:
     selected_view = "Single Store Restricted View"
