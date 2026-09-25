@@ -91,11 +91,16 @@ if uploaded_files:
         exp_group = group[group['Order_Type_Clean'] == 'express']
         sched_group = group[group['Order_Type_Clean'] != 'express']
         
+        deliv_exp = exp_group[exp_group['Order_Status'] == 'DELIVERED']
+        deliv_sched = sched_group[sched_group['Order_Status'] == 'DELIVERED']
+
         exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
         exp_disp_sla = round((exp_group['Dispatch_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
-        del_sla = round((group['On_Time_Delivered'].sum() / len(group) * 100), 1) if len(group) > 0 else 0.0
         
-        # Calculate Store CPO
+        # Separate Delivery SLAs
+        exp_del_sla = round((deliv_exp['On_Time_Delivered'].sum() / len(deliv_exp) * 100), 1) if len(deliv_exp) > 0 else 0.0
+        std_del_sla = round((deliv_sched['On_Time_Delivered'].sum() / len(deliv_sched) * 100), 1) if len(deliv_sched) > 0 else 0.0
+        
         active_riders = group[group['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
         total_delivered = len(group[group['Order_Status'] == 'DELIVERED'])
         total_rider_cost = active_riders * 1050
@@ -106,7 +111,8 @@ if uploaded_files:
             'Store_Name': store,
             'Express_Packed_SLA': exp_pack_sla,
             'Express_Dispatch_SLA': exp_disp_sla,
-            'Delivery_SLA': del_sla,
+            'Express_Delivery_SLA': exp_del_sla,
+            'Standard_Delivery_SLA': std_del_sla,
             'Express_Orders': len(exp_group),
             'Standard_Orders': len(sched_group),
             'Total_Delivered': total_delivered,
@@ -186,7 +192,7 @@ def filter_kpi_history(df):
         res = res[(res['Date'].dt.date >= selected_date_range[0]) & (res['Date'].dt.date <= selected_date_range[1])]
     return res
 
-# --- LIVE DATA DISPLAY ---
+# --- DISPLAY VIEW LOGIC ---
 if has_live_data:
     master_df = st.session_state['master_df']
     filtered_df = master_df.copy()
@@ -216,23 +222,66 @@ if has_live_data:
 
     st.markdown("---")
 
+    # If 'All Stores Single View' is selected, show Store-level table first
+    if selected_view == "All Stores Single View" and not url_store:
+        st.subheader("📋 Store-Wise SLA & CPO Summary Table")
+        
+        all_store_rows = []
+        for store, s_group in filtered_df.groupby('Store_Name'):
+            exp_group = s_group[s_group['Order_Type_Clean'] == 'express']
+            sched_group = s_group[s_group['Order_Type_Clean'] != 'express']
+            deliv_exp = exp_group[exp_group['Order_Status'] == 'DELIVERED']
+            deliv_sched = sched_group[sched_group['Order_Status'] == 'DELIVERED']
+            
+            exp_pack = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+            exp_disp = round((exp_group['Dispatch_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
+            exp_del = round((deliv_exp['On_Time_Delivered'].sum() / len(deliv_exp) * 100), 1) if len(deliv_exp) > 0 else 0.0
+            std_del = round((deliv_sched['On_Time_Delivered'].sum() / len(deliv_sched) * 100), 1) if len(deliv_sched) > 0 else 0.0
+            
+            active_riders = s_group[s_group['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
+            tot_delivered = len(s_group[s_group['Order_Status'] == 'DELIVERED'])
+            cpo = round((active_riders * 1050) / tot_delivered, 2) if tot_delivered > 0 else 0.0
+            
+            all_store_rows.append({
+                'Store_Name': store,
+                'Express_Packed_SLA (%)': exp_pack,
+                'Express_Dispatch_SLA (%)': exp_disp,
+                'Express_Delivery_SLA (%)': exp_del,
+                'Standard_Delivery_SLA (%)': std_del,
+                'Express Orders': len(exp_group),
+                'Standard Orders': len(sched_group),
+                'Total Delivered': tot_delivered,
+                'Active Riders': active_riders,
+                'Store_CPO (₹)': cpo
+            })
+            
+        st.dataframe(pd.DataFrame(all_store_rows), use_container_width=True)
+        st.markdown("---")
+
     exp_df = filtered_df[filtered_df['Order_Type_Clean'] == 'express']
+    sched_df = filtered_df[filtered_df['Order_Type_Clean'] != 'express']
     
     exp_packed_pct = (exp_df['Pick_SLA_Met'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0.0
     exp_dispatch_pct = (exp_df['Dispatch_SLA_Met'].sum() / len(exp_df) * 100) if len(exp_df) > 0 else 0.0
-    del_sla_pct = (filtered_df['On_Time_Delivered'].sum() / len(filtered_df) * 100) if len(filtered_df) > 0 else 0.0
+    
+    exp_deliv = exp_df[exp_df['Order_Status'] == 'DELIVERED']
+    sched_deliv = sched_df[sched_df['Order_Status'] == 'DELIVERED']
+    
+    exp_del_sla_pct = (exp_deliv['On_Time_Delivered'].sum() / len(exp_deliv) * 100) if len(exp_deliv) > 0 else 0.0
+    std_del_sla_pct = (sched_deliv['On_Time_Delivered'].sum() / len(sched_deliv) * 100) if len(sched_deliv) > 0 else 0.0
     
     delivered_orders = filtered_df[filtered_df['Order_Status'] == 'DELIVERED']
     active_riders_cnt = delivered_orders[delivered_orders['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
     total_delivered_cnt = len(delivered_orders)
     overall_cpo = (active_riders_cnt * 1050 / total_delivered_cnt) if total_delivered_cnt > 0 else 0.0
 
-    st.subheader("🎯 SLA & Cost Metrics")
-    k1, k2, k3, k4 = st.columns(4)
+    st.subheader("🎯 Overall SLA & Cost Metrics")
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Express Pick SLA (≤3m)", f"{exp_packed_pct:.1f}%")
     k2.metric("Express Dispatch SLA (≤6m)", f"{exp_dispatch_pct:.1f}%")
-    k3.metric("Delivery SLA Compliance", f"{del_sla_pct:.1f}%")
-    k4.metric("Overall CPO (₹1050 Salary)", f"₹{overall_cpo:.2f}")
+    k3.metric("Express Delivery SLA", f"{exp_del_sla_pct:.1f}%")
+    k4.metric("Standard Delivery SLA", f"{std_del_sla_pct:.1f}%")
+    k5.metric("Overall CPO (₹1050 Salary)", f"₹{overall_cpo:.2f}")
 
     st.markdown("---")
 
@@ -296,7 +345,6 @@ if has_live_data:
     with tab_rider:
         st.subheader("🏍️ Rider Performance & Cost Per Order (CPO)")
         
-        # Rider-Level Table
         rider_df = filtered_df[filtered_df['Order_Status'] == 'DELIVERED'].copy()
         
         rider_summary = []
@@ -307,11 +355,9 @@ if has_live_data:
             std_cnt = int((r_group['Order_Type_Clean'] != 'express').sum())
             tot_cnt = len(r_group)
             
-            # Express Avg Transit Duration (Dispatched to Completed)
             exp_r_group = r_group[r_group['Order_Type_Clean'] == 'express']
             avg_transit = exp_r_group['Transit_Duration_Min'].mean() if len(exp_r_group) > 0 else 0.0
             
-            # Rider CPO Calculation: 1050 / Total Delivered Orders
             rider_cpo = round(1050.0 / tot_cnt, 2) if tot_cnt > 0 else 0.0
             
             rider_summary.append({
@@ -328,27 +374,8 @@ if has_live_data:
             st.dataframe(pd.DataFrame(rider_summary), use_container_width=True)
         else:
             st.info("No active rider records found for selected filter.")
-            
-        st.markdown("---")
-        st.markdown("##### **Store-Wise CPO Summary Table**")
-        
-        store_cpo_summary = []
-        for store, s_group in filtered_df[filtered_df['Order_Status'] == 'DELIVERED'].groupby('Store_Name'):
-            s_active_riders = s_group[s_group['Rider_Name'] != 'Unassigned']['Rider_Name'].nunique()
-            s_tot_orders = len(s_group)
-            s_tot_cost = s_active_riders * 1050
-            s_cpo = round(s_tot_cost / s_tot_orders, 2) if s_tot_orders > 0 else 0.0
-            
-            store_cpo_summary.append({
-                'Store Name': store,
-                'Active Riders Count': s_active_riders,
-                'Total Rider Cost (₹)': f"₹{s_tot_cost:,}",
-                'Total Delivered Orders': s_tot_orders,
-                'Store CPO (₹)': f"₹{s_cpo:.2f}"
-            })
-        st.dataframe(pd.DataFrame(store_cpo_summary), use_container_width=True)
 
-# --- HISTORICAL DATA DISPLAY ---
+# --- HISTORICAL DATA DISPLAY (BEFORE UPLOAD) ---
 else:
     st.title("🌐 Delivery & Fulfillment Historical Dashboard")
     st.info("💡 Upload `ORDER_STATUS_TRANSITIONS` reports via the sidebar to calculate live metrics.")
