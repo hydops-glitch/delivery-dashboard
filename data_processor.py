@@ -50,7 +50,13 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     
     raw_picklist = pd.concat(picklist_frames, ignore_index=True)
     
-    # Aggregate Picklist Data
+    # Ensure numeric picking time in seconds
+    if 'Picking Time In Seconds' in raw_picklist.columns:
+        raw_picklist['Picking Time In Seconds'] = pd.to_numeric(raw_picklist['Picking Time In Seconds'], errors='coerce').fillna(0)
+    else:
+        raw_picklist['Picking Time In Seconds'] = 0
+
+    # Aggregate Picklist Data directly using Picking Time In Seconds
     pick_agg = raw_picklist.groupby('Order Reference').agg({
         'Warehouse': 'first',
         'Order Date': 'first',
@@ -73,15 +79,12 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     
     # Read Transactions Data
     df_trans = read_file_safely(transactions_file_path)
-    
     trans_clean = df_trans.copy()
+    
     if 'ID' in trans_clean.columns:
         trans_clean.rename(columns={'ID': 'Order_ID'}, inplace=True)
         
-    # Identify Column C or Status Column
-    status_col = trans_clean.columns[2] if len(trans_clean.columns) >= 3 else 'Order State'
-    if 'Order State' in trans_clean.columns:
-        status_col = 'Order State'
+    status_col = 'Order State' if 'Order State' in trans_clean.columns else (trans_clean.columns[2] if len(trans_clean.columns) >= 3 else 'Status')
 
     # Filter out PAYMENT FAILED and CANCELLED orders
     excluded_statuses = ['PAYMENT FAILED', 'CANCELLED']
@@ -90,10 +93,8 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     # Merge Picklist and Filtered Transactions
     master_df = pd.merge(pick_agg, trans_filtered, on='Order_ID', how='inner')
     
-    # --- DATE MAPPING: PRIORITIZE REQUEST DELIVERY TIME FOR DAILY COUNTS ---
-    if 'Request Delivery Time' in master_df.columns:
-        master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Request Delivery Time'], errors='coerce').dt.tz_localize(None)
-    elif 'Order_Placing_Time' in master_df.columns:
+    # Date Handling
+    if 'Order_Placing_Time' in master_df.columns:
         master_df['Order_Placing_Time'] = pd.to_datetime(master_df['Order_Placing_Time'], errors='coerce').dt.tz_localize(None)
         
     master_df['Pick_Confirmed_Time'] = pd.to_datetime(master_df['Pick_Confirmed_Time'], errors='coerce').dt.tz_localize(None)
@@ -101,11 +102,8 @@ def process_and_merge_reports(picklist_files_list, transactions_file_path):
     if 'Delivered Time' in master_df.columns:
         master_df['Delivered Time'] = pd.to_datetime(master_df['Delivered Time'], errors='coerce').dt.tz_localize(None)
     
-    # 1. Picking Duration Calculation
-    master_df['Pick_Duration_Sec'] = (
-        (master_df['Pick_Confirmed_Time'] - master_df['Order_Placing_Time']).dt.total_seconds()
-    ).fillna(0)
-    master_df['Pick_Duration_Sec'] = master_df['Pick_Duration_Sec'].apply(lambda x: max(x, 0))
+    # 1. Picking Duration Calculation directly from Picking Time In Seconds column
+    master_df['Pick_Duration_Sec'] = master_df['Picking Time In Seconds']
     master_df['Pick Duration'] = master_df['Pick_Duration_Sec'].apply(format_duration)
     
     # Pick SLA Rule: Express <= 3 mins (180 secs)
