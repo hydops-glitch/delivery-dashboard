@@ -121,41 +121,57 @@ if picklist_files and transaction_file:
     save_daily_kpis(combined_kpis)
     st.sidebar.success("Reports processed & KPIs saved to Google Sheets!")
 
+# --- HELPER FUNCTION TO GENERATE STORE METRICS TABLE ---
+def build_store_summary_table(df):
+    store_stats = []
+    num_days = max(df['Order_Placing_Time'].dt.date.nunique(), 1)
+    
+    for store, group in df.groupby('Store_Name'):
+        exp_group = group[group['Order Type'].str.lower() == 'express']
+        sched_group = group[group['Order Type'].str.lower() != 'express']
+        
+        exp_pack_pct = (exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0
+        exp_del_pct = (exp_group['On Time Delivered'].sum() / len(exp_group) * 100) if len(exp_group) > 0 else 0
+        sched_del_pct = (sched_group['On Time Delivered'].sum() / len(sched_group) * 100) if len(sched_group) > 0 else 0
+        
+        tot_avg = round(len(group) / num_days)
+        self_avg = round((group['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
+        tpl_avg = round((group['Rider_Channel'] == '3PL Partner').sum() / num_days)
+        
+        store_stats.append({
+            'Store Name': store,
+            'Express Packed SLA (≤3m)': f"{exp_pack_pct:.1f}%",
+            'Express Delivered SLA': f"{exp_del_pct:.1f}%",
+            'Scheduled Delivered SLA': f"{sched_del_pct:.1f}%",
+            'Avg Total Orders / Day': tot_avg,
+            'Avg Self Orders / Day': self_avg,
+            'Avg 3PL Orders / Day': tpl_avg
+        })
+    return pd.DataFrame(store_stats)
+
 # --- MAIN DASHBOARD VIEW ---
 if 'master_df' in st.session_state:
     master_df = st.session_state['master_df']
     all_stores_list = sorted(list(master_df['Store_Name'].unique()))
     
-    col_view, col_store, col_filter_type, col_picker = st.columns([2, 2, 2, 3])
+    col_view, col_filter_type, col_picker = st.columns([3, 2, 3])
     
     # Store Link Access Restriction Logic
     if url_store and url_store in all_stores_list:
-        selected_view = "Store-Level View"
-        selected_store = url_store
-        st.info(f"🔒 Access Restricted View: **{selected_store}**")
+        selected_view = "Single Store Restricted View"
+        st.info(f"🔒 Access Restricted View: **{url_store}**")
     else:
         with col_view:
-            selected_view = st.radio("👁️ View Mode", ["Overall Region View", "Store-Level View"], horizontal=True)
+            selected_view = st.radio("👁️ View Mode", ["Overall Region View", "All Stores Single View"], horizontal=True)
             
-        with col_store:
-            if selected_view == "Store-Level View":
-                selected_store = st.selectbox("🏬 Select Store", all_stores_list)
-            else:
-                selected_store = "All Stores (HYD Region)"
-
-    if selected_view == "Store-Level View":
-        filtered_df = master_df[master_df['Store_Name'] == selected_store].copy()
-        header_title = f"🏬 Store Performance: {selected_store}"
-    else:
-        filtered_df = master_df.copy()
-        header_title = "🌐 HYD Region Overall Performance Overview"
-        
     with col_filter_type:
         date_filter_mode = st.radio("📅 Date Filter", ["Reporting Cycle", "Custom Range"], horizontal=True)
         
     today_day = datetime.date.today().day
     default_cycle_idx = 0 if today_day <= 7 else (1 if today_day <= 14 else (2 if today_day <= 21 else 3))
 
+    # Apply Date Filtering across Master Data
+    filtered_df = master_df.copy()
     with col_picker:
         if date_filter_mode == "Reporting Cycle":
             cycle_period = st.selectbox(
@@ -180,11 +196,18 @@ if 'master_df' in st.session_state:
                     (filtered_df['Order_Placing_Time'].dt.date <= end_date)
                 ]
 
-    st.title(header_title)
+    # Render Overall View vs Single Restricted Store vs All Stores View
+    if url_store and url_store in all_stores_list:
+        filtered_df = filtered_df[filtered_df['Store_Name'] == url_store]
+        st.title(f"🏬 Store Performance: {url_store}")
+    elif selected_view == "Overall Region View":
+        st.title("🌐 HYD Region Overall Performance Overview")
+    else:
+        st.title("🏬 All Stores Performance (Single View)")
+
     st.markdown("---")
 
-    # --- KPI HIGHLIGHTS ---
-    st.subheader("🎯 KPI Highlights")
+    # Overall KPIs Banner
     exp_df = filtered_df[filtered_df['Order Type'].str.lower() == 'express']
     sched_df = filtered_df[filtered_df['Order Type'].str.lower() != 'express']
     
@@ -193,17 +216,25 @@ if 'master_df' in st.session_state:
     sched_del_pct = (sched_df['On Time Delivered'].sum() / len(sched_df) * 100) if len(sched_df) > 0 else 0
     
     num_days = max((filtered_df['Order_Placing_Time'].dt.date.nunique()), 1)
-    total_orders_avg = round(len(filtered_df) / num_days)
-    self_orders_avg = round((filtered_df['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
-    tpl_orders_avg = round((filtered_df['Rider_Channel'] == '3PL Partner').sum() / num_days)
+    tot_avg = round(len(filtered_df) / num_days)
+    self_avg = round((filtered_df['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
+    tpl_avg = round((filtered_df['Rider_Channel'] == '3PL Partner').sum() / num_days)
     
+    st.subheader("🎯 Region Summary Metrics")
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Express Packed SLA (≤3m)", f"{exp_packed_pct:.1f}%")
     k2.metric("Express Delivered %", f"{exp_del_pct:.1f}%")
     k3.metric("Scheduled Delivered %", f"{sched_del_pct:.1f}%")
-    k4.metric("Avg Daily Orders (Total)", f"{total_orders_avg:,} / day", help=f"Self: {self_orders_avg} | 3PL: {tpl_orders_avg}")
+    k4.metric("Avg Daily Orders (Total / Self / 3PL)", f"{tot_avg} / {self_avg} / {tpl_avg}")
 
     st.markdown("---")
+
+    # ALL STORES SINGLE VIEW TABLE
+    if selected_view == "All Stores Single View" and not url_store:
+        st.subheader("📊 Store-by-Store Comparison (Single View)")
+        store_comparison_df = build_store_summary_table(filtered_df)
+        st.dataframe(store_comparison_df, use_container_width=True)
+        st.markdown("---")
 
     tab_pick, tab_del, tab_mgr = st.tabs([
         "⚡ Express Packing Delays (>3m)", 
@@ -261,58 +292,37 @@ if 'master_df' in st.session_state:
     with tab_mgr:
         st.subheader("📊 Manager Review (Saved Remarks Audit)")
         if not saved_db.empty:
-            display_db = saved_db[saved_db['Store_Name'] == selected_store] if selected_store != 'All Stores (HYD Region)' else saved_db.copy()
-            st.dataframe(display_db, use_container_width=True)
+            st.dataframe(saved_db, use_container_width=True)
         else:
             st.info("No saved remarks found in Google Sheets yet.")
 
 # HISTORICAL VIEW (DEFAULT LANDING VIEW)
 else:
     st.title("🌐 Delivery & Fulfillment Historical Performance")
-    st.info("💡 Displaying historical performance trends. Upload fresh daily reports via the sidebar to process new orders.")
+    st.info("💡 Displaying historical performance trends from Google Sheets. Upload fresh daily reports via the sidebar to process new orders.")
     
     kpi_history = load_saved_kpis()
     
     if not kpi_history.empty:
-        all_hist_stores = sorted(list(kpi_history['Store_Name'].unique()))
-        
-        if url_store and url_store in all_hist_stores:
-            selected_hist_store = url_store
-            st.info(f"🔒 Access Restricted View: **{selected_hist_store}**")
-        else:
-            h_col1, h_col2 = st.columns([2, 2])
-            with h_col1:
-                hist_view_mode = st.radio("👁️ View Mode", ["Overall Region View", "Store-Level View"], horizontal=True)
-            with h_col2:
-                if hist_view_mode == "Store-Level View":
-                    selected_hist_store = st.selectbox("🏬 Select Store", all_hist_stores)
-                else:
-                    selected_hist_store = "All Stores (HYD Region)"
-        
-        if selected_hist_store != 'All Stores (HYD Region)':
-            filtered_kpi = kpi_history[kpi_history['Store_Name'] == selected_hist_store]
-        else:
-            filtered_kpi = kpi_history.copy()
-            
         st.subheader("📈 Persistent Performance Metrics")
         
-        exp_pack_avg = filtered_kpi['Express_Packed_SLA'].mean() if not filtered_kpi.empty else 0
-        exp_del_avg = filtered_kpi['Express_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
-        sched_del_avg = filtered_kpi['Scheduled_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
+        exp_pack_avg = kpi_history['Express_Packed_SLA'].mean() if not kpi_history.empty else 0
+        exp_del_avg = kpi_history['Express_Delivered_SLA'].mean() if not kpi_history.empty else 0
+        sched_del_avg = kpi_history['Scheduled_Delivered_SLA'].mean() if not kpi_history.empty else 0
         
-        total_vol = filtered_kpi['Total_Orders'].sum() if not filtered_kpi.empty else 0
-        total_self = filtered_kpi['Self_Orders'].sum() if not filtered_kpi.empty else 0
-        total_tpl = filtered_kpi['TPL_Orders'].sum() if not filtered_kpi.empty else 0
+        tot_vol = kpi_history['Total_Orders'].sum() if not kpi_history.empty else 0
+        self_vol = kpi_history['Self_Orders'].sum() if not kpi_history.empty else 0
+        tpl_vol = kpi_history['TPL_Orders'].sum() if not kpi_history.empty else 0
         
         hk1, hk2, hk3, hk4 = st.columns(4)
         hk1.metric("Avg Express Packed SLA", f"{exp_pack_avg:.1f}%")
         hk2.metric("Avg Express Delivered SLA", f"{exp_del_avg:.1f}%")
         hk3.metric("Avg Scheduled Delivered SLA", f"{sched_del_avg:.1f}%")
-        hk4.metric("Total Volume (Self / 3PL)", f"{total_vol:,}", help=f"Self: {total_self:,} | 3PL: {total_tpl:,}")
+        hk4.metric("Total Volume (Total / Self / 3PL)", f"{tot_vol:,} / {self_vol:,} / {tpl_vol:,}")
         
         st.markdown("---")
-        st.subheader("📋 Historical Daily KPI Table")
-        st.dataframe(filtered_kpi, use_container_width=True)
+        st.subheader("📋 Store-by-Store Historical Table")
+        st.dataframe(kpi_history, use_container_width=True)
     else:
         st.warning("No historical performance data saved yet. Upload your first report from the sidebar to store KPIs!")
 
