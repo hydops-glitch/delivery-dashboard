@@ -7,6 +7,7 @@ from data_processor import process_and_merge_reports
 
 st.set_page_config(page_title="Fulfilment & Delivery Dashboard", layout="wide")
 
+# --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource
 def get_gspread_client():
     scope = [
@@ -30,6 +31,30 @@ def load_saved_remarks():
             'Order_Type', 'Delay_Reason', 'Submitted_By', 'Timestamp'
         ])
 
+def load_saved_kpis():
+    try:
+        client = get_gspread_client()
+        sheet_id = st.secrets["sheets"]["spreadsheet_id"]
+        sheet = client.open_by_key(sheet_id).worksheet("Daily_KPIs")
+        records = sheet.get_all_records()
+        return pd.DataFrame(records)
+    except Exception:
+        return pd.DataFrame()
+
+def save_daily_kpis(kpi_df):
+    try:
+        client = get_gspread_client()
+        sheet_id = st.secrets["sheets"]["spreadsheet_id"]
+        sheet = client.open_by_key(sheet_id).worksheet("Daily_KPIs")
+        
+        # Clear existing data and rewrite full updated historical trends
+        sheet.clear()
+        sheet.update([kpi_df.columns.values.tolist()] + kpi_df.values.tolist())
+        return True
+    except Exception as e:
+        st.error(f"Error saving KPIs to Google Sheets: {e}")
+        return False
+
 def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reason):
     try:
         client = get_gspread_client()
@@ -47,7 +72,7 @@ def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reas
 
 # --- SIDEBAR UPLOADER ---
 st.sidebar.header("📂 Data Controls")
-st.sidebar.markdown("Upload fresh reports to analyze new daily orders.")
+st.sidebar.markdown("Upload daily reports to calculate metrics & log delays.")
 
 picklist_files = st.sidebar.file_uploader("Upload Store Picklist Reports (.xls/.csv)", accept_multiple_files=True)
 transaction_file = st.sidebar.file_uploader("Upload Order Transactions Report (.xlsx/.csv)")
@@ -55,19 +80,54 @@ transaction_file = st.sidebar.file_uploader("Upload Order Transactions Report (.
 saved_db = load_saved_remarks()
 saved_order_ids = set(saved_db['Order_ID'].astype(str).unique()) if not saved_db.empty else set()
 
-# Process uploaded files if available
+# Process uploaded files
 if picklist_files and transaction_file:
-    st.session_state['master_df'] = process_and_merge_reports(picklist_files, transaction_file)
-    st.sidebar.success("Fresh data processed successfully!")
+    master_df = process_and_merge_reports(picklist_files, transaction_file)
+    st.session_state['master_df'] = master_df
+    
+    # Calculate daily aggregate KPIs to store persistently
+    daily_summary = []
+    for (order_date, store), group in master_df.groupby([master_df['Order_Placing_Time'].dt.date, 'Store_Name']):
+        exp_group = group[group['Order Type'].str.lower() == 'express']
+        sched_group = group[group['Order Type'].str.lower() != 'express']
+        
+        exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0
+        exp_del_sla = round((exp_group['On Time Delivered'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0
+        sched_del_sla = round((sched_group['On Time Delivered'].sum() / len(sched_group) * 100), 1) if len(sched_group) > 0 else 0
+        
+        self_cnt = int((group['Rider_Channel'] == 'Self (In-House)').sum())
+        tpl_cnt = int((group['Rider_Channel'] == '3PL Partner').sum())
+        
+        daily_summary.append({
+            'Date': str(order_date),
+            'Store_Name': store,
+            'Express_Packed_SLA': exp_pack_sla,
+            'Express_Delivered_SLA': exp_del_sla,
+            'Scheduled_Delivered_SLA': sched_del_sla,
+            'Self_Orders': self_cnt,
+            'TPL_Orders': tpl_cnt,
+            'Total_Orders': len(group)
+        })
+    
+    new_kpi_df = pd.DataFrame(daily_summary)
+    existing_kpi_df = load_saved_kpis()
+    
+    # Combine existing Google Sheets KPIs with new data and deduplicate
+    if not existing_kpi_df.empty:
+        combined_kpis = pd.concat([existing_kpi_df, new_kpi_df]).drop_duplicates(subset=['Date', 'Store_Name'], keep='last')
+    else:
+        combined_kpis = new_kpi_df
+        
+    save_daily_kpis(combined_kpis)
+    st.sidebar.success("Reports processed & KPIs updated in Google Sheets!")
 
-# Check if data exists in Session State or Google Sheets
+# ACTIVE DATA VIEW (WHEN FILES ARE UPLOADING / IN SESSION)
 if 'master_df' in st.session_state:
     master_df = st.session_state['master_df']
     
-    # --- TOP ROW CONTROLS ---
     col_store, col_filter_type, col_picker = st.columns([2, 2, 3])
-    
     stores = ['All Stores (HYD Region)'] + sorted(list(master_df['Store_Name'].unique()))
+    
     with col_store:
         selected_store = st.selectbox("🏬 Select Store / Location", stores)
     
@@ -111,9 +171,7 @@ if 'master_df' in st.session_state:
     st.title(header_title)
     st.markdown("---")
 
-    # --- KPI HIGHLIGHTS ---
     st.subheader("🎯 KPI Highlights")
-    
     exp_df = filtered_df[filtered_df['Order Type'].str.lower() == 'express']
     sched_df = filtered_df[filtered_df['Order Type'].str.lower() != 'express']
     
@@ -133,7 +191,6 @@ if 'master_df' in st.session_state:
 
     st.markdown("---")
 
-    # --- TABS FOR REMARKS ---
     tab_pick, tab_del, tab_mgr = st.tabs([
         "⚡ Express Packing Delays (>3m)", 
         "🚚 Delivery Delays", 
@@ -190,29 +247,49 @@ if 'master_df' in st.session_state:
     with tab_mgr:
         st.subheader("📊 Manager Review (Saved Remarks Audit)")
         if not saved_db.empty:
-            if selected_store != 'All Stores (HYD Region)':
-                display_db = saved_db[saved_db['Store_Name'] == selected_store]
-            else:
-                display_db = saved_db.copy()
+            display_db = saved_db[saved_db['Store_Name'] == selected_store] if selected_store != 'All Stores (HYD Region)' else saved_db.copy()
             st.dataframe(display_db, use_container_width=True)
         else:
             st.info("No saved remarks found in Google Sheets yet.")
 
+# HISTORICAL VIEW (DEFAULT LANDING VIEW WHEN NO FILE IS UPLOADED IN SESSION)
 else:
-    # --- DEFAULT LANDING PAGE WHEN NO FRESH FILE IS UPLOADED ---
-    st.title("🌐 Delivery & Fulfillment Historical Dashboard")
-    st.info("💡 Showing historical submitted delay remarks. To analyze fresh raw reports, upload files via the sidebar on the left.")
+    st.title("🌐 Delivery & Fulfillment Historical Performance")
+    st.info("💡 Displaying historical performance trends from Google Sheets. Upload fresh reports via the sidebar to calculate new daily metrics.")
     
-    st.subheader("📊 Submitted Delay Remarks Database")
+    kpi_history = load_saved_kpis()
+    
+    if not kpi_history.empty:
+        stores = ['All Stores (HYD Region)'] + sorted(list(kpi_history['Store_Name'].unique()))
+        selected_hist_store = st.selectbox("🏬 Select Store / Location", stores)
+        
+        if selected_hist_store != 'All Stores (HYD Region)':
+            filtered_kpi = kpi_history[kpi_history['Store_Name'] == selected_hist_store]
+        else:
+            filtered_kpi = kpi_history.copy()
+            
+        st.subheader("📈 Persistent Performance Metrics")
+        
+        exp_pack_avg = filtered_kpi['Express_Packed_SLA'].mean() if not filtered_kpi.empty else 0
+        exp_del_avg = filtered_kpi['Express_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
+        sched_del_avg = filtered_kpi['Scheduled_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
+        total_vol = filtered_kpi['Total_Orders'].sum() if not filtered_kpi.empty else 0
+        
+        hk1, hk2, hk3, hk4 = st.columns(4)
+        hk1.metric("Avg Express Packed SLA", f"{exp_pack_avg:.1f}%")
+        hk2.metric("Avg Express Delivered SLA", f"{exp_del_avg:.1f}%")
+        hk3.metric("Avg Scheduled Delivered SLA", f"{sched_del_avg:.1f}%")
+        hk4.metric("Total Historical Orders", f"{total_vol:,}")
+        
+        st.markdown("---")
+        st.subheader("📋 Historical Daily KPI Table")
+        st.dataframe(filtered_kpi, use_container_width=True)
+    else:
+        st.warning("No historical performance data saved yet. Upload your first report from the sidebar to store KPIs!")
+
+    st.markdown("---")
+    st.subheader("📋 Historical Delay Remarks Database")
     if not saved_db.empty:
         st.dataframe(saved_db, use_container_width=True)
-        
-        csv_data = saved_db.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Download All Historical Remarks (CSV)",
-            data=csv_data,
-            file_name=f"Historical_Delay_Remarks_{datetime.date.today()}.csv",
-            mime="text/csv"
-        )
     else:
         st.write("No historical delay records submitted yet.")
