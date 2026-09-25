@@ -5,7 +5,66 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from data_processor import process_and_merge_reports
 
-st.set_page_config(page_title="Fulfilment, Rider & Delivery Dashboard", layout="wide")
+st.set_page_config(page_title="Hyd Region Performance Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+# --- EXECUTIVE STYLING & PROFESSIONAL THEME ---
+st.markdown("""
+<style>
+    /* Global Typography & Background */
+    .stApp {
+        background-color: #f8f9fa;
+    }
+    
+    /* Title styling */
+    .main-header {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #1e293b;
+        margin-bottom: 0.25rem;
+    }
+    .sub-header {
+        font-size: 0.95rem;
+        color: #64748b;
+        margin-bottom: 1.5rem;
+    }
+
+    /* Metric Cards */
+    div[data-testid="stMetric"] {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        padding: 12px 18px;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    div[data-testid="stMetric"] label {
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        color: #475569 !important;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        font-size: 1.5rem !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+    }
+
+    /* Control Panel Box */
+    .control-panel {
+        background-color: #ffffff;
+        padding: 16px 20px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        margin-bottom: 20px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    
+    /* Table Styling */
+    .stDataFrame {
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid #e2e8f0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # --- GOOGLE SHEETS CONNECTION ---
 @st.cache_resource
@@ -37,7 +96,10 @@ def load_saved_kpis():
         sheet_id = st.secrets["sheets"]["spreadsheet_id"]
         sheet = client.open_by_key(sheet_id).worksheet("Daily_KPIs")
         records = sheet.get_all_records()
-        return pd.DataFrame(records)
+        df = pd.DataFrame(records)
+        if not df.empty and 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        return df
     except Exception:
         return pd.DataFrame()
 
@@ -47,7 +109,13 @@ def save_daily_kpis(kpi_df):
         sheet_id = st.secrets["sheets"]["spreadsheet_id"]
         sheet = client.open_by_key(sheet_id).worksheet("Daily_KPIs")
         sheet.clear()
-        sheet.update([kpi_df.columns.values.tolist()] + kpi_df.values.tolist())
+        
+        # Format Date cleanly for export
+        export_df = kpi_df.copy()
+        if 'Date' in export_df.columns:
+            export_df['Date'] = export_df['Date'].astype(str)
+            
+        sheet.update([export_df.columns.values.tolist()] + export_df.values.tolist())
         return True
     except Exception as e:
         st.error(f"Error saving KPIs: {e}")
@@ -74,9 +142,7 @@ url_store = query_params.get("store", None)
 
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("📂 Data Controls")
-st.sidebar.markdown("Upload Order Transitions Report (.xlsx / .csv)")
-
-uploaded_files = st.sidebar.file_uploader("Upload Report Files", accept_multiple_files=True)
+uploaded_files = st.sidebar.file_uploader("Upload Order Transitions Report (.xlsx / .csv)", accept_multiple_files=True)
 
 saved_db = load_saved_remarks()
 saved_order_ids = set(saved_db['Order_ID'].astype(str).unique()) if not saved_db.empty else set()
@@ -97,7 +163,7 @@ if uploaded_files:
         exp_pack_sla = round((exp_group['Pick_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
         exp_disp_sla = round((exp_group['Dispatch_SLA_Met'].sum() / len(exp_group) * 100), 1) if len(exp_group) > 0 else 0.0
         
-        # Separate Delivery SLAs
+        # Strictly Separate Delivery SLAs
         exp_del_sla = round((deliv_exp['On_Time_Delivered'].sum() / len(deliv_exp) * 100), 1) if len(deliv_exp) > 0 else 0.0
         std_del_sla = round((deliv_sched['On_Time_Delivered'].sum() / len(deliv_sched) * 100), 1) if len(deliv_sched) > 0 else 0.0
         
@@ -129,13 +195,23 @@ if uploaded_files:
         combined_kpis = new_kpi_df
         
     save_daily_kpis(combined_kpis)
-    st.sidebar.success("Report processed & metrics updated successfully!")
+    st.sidebar.success("Report processed successfully!")
 
-# --- TOP FILTER BAR ---
+# --- LOAD DATASETS ---
 has_live_data = 'master_df' in st.session_state
 kpi_history = load_saved_kpis()
 
-col_view, col_filter_type, col_picker = st.columns([3, 2, 3])
+# Determine maximum/latest available date in dataset
+latest_available_date = datetime.date.today()
+if has_live_data:
+    latest_available_date = st.session_state['master_df']['Placed_Time'].dt.date.max()
+elif not kpi_history.empty and 'Date' in kpi_history.columns:
+    latest_available_date = kpi_history['Date'].dt.date.max()
+
+# --- TOP LEFT-ALIGNED CONTROL PANEL ---
+st.markdown('<div class="main-header">Hyd Region Performance</div>', unsafe_allow_html=True)
+
+ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2.5, 2.5, 4])
 
 all_stores_list = []
 if has_live_data:
@@ -147,85 +223,43 @@ if url_store and url_store in all_stores_list:
     selected_view = "Single Store Restricted View"
     st.info(f"🔒 Access Restricted View: **{url_store}**")
 else:
-    with col_view:
-        selected_view = st.radio("👁️ View Mode", ["Overall Region View", "All Stores Single View"], horizontal=True)
+    with ctrl_col1:
+        selected_view = st.radio("View Mode", ["Overall Region View", "All Stores Single View"], horizontal=True)
 
-with col_filter_type:
-    date_filter_mode = st.radio("📅 Date Filter", ["Reporting Cycle", "Custom Range"], horizontal=True)
+with ctrl_col2:
+    selected_date_range = st.date_input(
+        "Date Filter", 
+        value=(latest_available_date, latest_available_date),
+        max_value=latest_available_date
+    )
 
-today_day = datetime.date.today().day
-default_cycle_idx = 0 if today_day <= 7 else (1 if today_day <= 14 else (2 if today_day <= 21 else 3))
+st.markdown("<hr style='margin-top:5px; margin-bottom:20px; border-color:#e2e8f0;'>", unsafe_allow_html=True)
 
-selected_cycle = None
-selected_date_range = None
+# Helper function to extract date range bounds
+def get_start_end_dates(d_range):
+    if isinstance(d_range, tuple):
+        if len(d_range) == 2:
+            return d_range[0], d_range[1]
+        elif len(d_range) == 1:
+            return d_range[0], d_range[0]
+    return latest_available_date, latest_available_date
 
-with col_picker:
-    if date_filter_mode == "Reporting Cycle":
-        selected_cycle = st.selectbox(
-            "Select Cycle",
-            ["Cycle 1 (1st - 7th)", "Cycle 2 (8th - 14th)", "Cycle 3 (15th - 21st)", "Cycle 4 (22nd - End)"],
-            index=default_cycle_idx
-        )
-    else:
-        selected_date_range = st.date_input(
-            "Select Date Range", 
-            value=(datetime.date.today(), datetime.date.today())
-        )
+start_date, end_date = get_start_end_dates(selected_date_range)
 
-# --- HELPER: FILTER HISTORICAL DATA ---
-def filter_kpi_history(df):
-    if df.empty or 'Date' not in df.columns:
-        return df
-    res = df.copy()
-    res['Date'] = pd.to_datetime(res['Date'], errors='coerce')
-    
-    if date_filter_mode == "Reporting Cycle" and selected_cycle:
-        if selected_cycle == "Cycle 1 (1st - 7th)":
-            res = res[res['Date'].dt.day.between(1, 7)]
-        elif selected_cycle == "Cycle 2 (8th - 14th)":
-            res = res[res['Date'].dt.day.between(8, 14)]
-        elif selected_cycle == "Cycle 3 (15th - 21st)":
-            res = res[res['Date'].dt.day.between(15, 21)]
-        elif selected_cycle == "Cycle 4 (22nd - End)":
-            res = res[res['Date'].dt.day >= 22]
-    elif date_filter_mode == "Custom Range" and isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
-        res = res[(res['Date'].dt.date >= selected_date_range[0]) & (res['Date'].dt.date <= selected_date_range[1])]
-    return res
-
-# --- DISPLAY VIEW LOGIC ---
+# --- LIVE DATA DISPLAY (WHEN REPORT UPLOADED) ---
 if has_live_data:
     master_df = st.session_state['master_df']
-    filtered_df = master_df.copy()
-
-    if date_filter_mode == "Reporting Cycle":
-        if selected_cycle == "Cycle 1 (1st - 7th)":
-            filtered_df = filtered_df[filtered_df['Placed_Time'].dt.day.between(1, 7)]
-        elif selected_cycle == "Cycle 2 (8th - 14th)":
-            filtered_df = filtered_df[filtered_df['Placed_Time'].dt.day.between(8, 14)]
-        elif selected_cycle == "Cycle 3 (15th - 21st)":
-            filtered_df = filtered_df[filtered_df['Placed_Time'].dt.day.between(15, 21)]
-        elif selected_cycle == "Cycle 4 (22nd - End)":
-            filtered_df = filtered_df[filtered_df['Placed_Time'].dt.day >= 22]
-    elif date_filter_mode == "Custom Range" and isinstance(selected_date_range, tuple) and len(selected_date_range) == 2:
-        filtered_df = filtered_df[
-            (filtered_df['Placed_Time'].dt.date >= selected_date_range[0]) & 
-            (filtered_df['Placed_Time'].dt.date <= selected_date_range[1])
-        ]
+    filtered_df = master_df[
+        (master_df['Placed_Time'].dt.date >= start_date) & 
+        (master_df['Placed_Time'].dt.date <= end_date)
+    ].copy()
 
     if url_store and url_store in all_stores_list:
         filtered_df = filtered_df[filtered_df['Store_Name'] == url_store]
-        st.title(f"🏬 Store Performance: {url_store}")
-    elif selected_view == "Overall Region View":
-        st.title("🌐 Regional Performance & SLA Dashboard")
-    else:
-        st.title("🏬 All Stores View")
 
-    st.markdown("---")
-
-    # If 'All Stores Single View' is selected, show Store-level table first
+    # All Stores Table View First
     if selected_view == "All Stores Single View" and not url_store:
-        st.subheader("📋 Store-Wise SLA & CPO Summary Table")
-        
+        st.subheader("📊 Store-Wise SLA & Performance Metrics")
         all_store_rows = []
         for store, s_group in filtered_df.groupby('Store_Name'):
             exp_group = s_group[s_group['Order_Type_Clean'] == 'express']
@@ -243,21 +277,22 @@ if has_live_data:
             cpo = round((active_riders * 1050) / tot_delivered, 2) if tot_delivered > 0 else 0.0
             
             all_store_rows.append({
-                'Store_Name': store,
-                'Express_Packed_SLA (%)': exp_pack,
-                'Express_Dispatch_SLA (%)': exp_disp,
-                'Express_Delivery_SLA (%)': exp_del,
-                'Standard_Delivery_SLA (%)': std_del,
+                'Store Name': store,
+                'Express Pick SLA (%)': exp_pack,
+                'Express Dispatch SLA (%)': exp_disp,
+                'Express Delivery SLA (%)': exp_del,
+                'Standard Delivery SLA (%)': std_del,
                 'Express Orders': len(exp_group),
                 'Standard Orders': len(sched_group),
                 'Total Delivered': tot_delivered,
                 'Active Riders': active_riders,
-                'Store_CPO (₹)': cpo
+                'Store CPO (₹)': f"₹{cpo:.2f}"
             })
             
         st.dataframe(pd.DataFrame(all_store_rows), use_container_width=True)
-        st.markdown("---")
+        st.markdown("<br>", unsafe_allow_html=True)
 
+    # Calculate Region Aggregates
     exp_df = filtered_df[filtered_df['Order_Type_Clean'] == 'express']
     sched_df = filtered_df[filtered_df['Order_Type_Clean'] != 'express']
     
@@ -275,15 +310,15 @@ if has_live_data:
     total_delivered_cnt = len(delivered_orders)
     overall_cpo = (active_riders_cnt * 1050 / total_delivered_cnt) if total_delivered_cnt > 0 else 0.0
 
-    st.subheader("🎯 Overall SLA & Cost Metrics")
+    st.subheader("🎯 Region SLA & Cost Summary")
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Express Pick SLA (≤3m)", f"{exp_packed_pct:.1f}%")
     k2.metric("Express Dispatch SLA (≤6m)", f"{exp_dispatch_pct:.1f}%")
     k3.metric("Express Delivery SLA", f"{exp_del_sla_pct:.1f}%")
     k4.metric("Standard Delivery SLA", f"{std_del_sla_pct:.1f}%")
-    k5.metric("Overall CPO (₹1050 Salary)", f"₹{overall_cpo:.2f}")
+    k5.metric("Overall CPO (₹1,050)", f"₹{overall_cpo:.2f}")
 
-    st.markdown("---")
+    st.markdown("<br>", unsafe_allow_html=True)
 
     tab_pick_disp, tab_del, tab_rider = st.tabs([
         "⚡ Express Pick & Dispatch Delays", 
@@ -291,7 +326,6 @@ if has_live_data:
         "🏍️ Rider Performance & CPO"
     ])
     
-    # --- TAB 1: EXPRESS PICK & DISPATCH BREACHES ---
     with tab_pick_disp:
         st.subheader("Express SLA Breaches (Pick >3m OR Dispatch >6m)")
         breached_exp = exp_df[
@@ -306,17 +340,16 @@ if has_live_data:
                 c2.write(row['Store_Name'])
                 c3.write(f"Pick: {row['Pick_Duration_Formatted']}")
                 c4.write(f"Dispatch: {row['Dispatch_Duration_Formatted']}")
-                reason_input = c5.text_input("Enter Delay Reason", key=f"pd_reason_{row['Order_ID']}", placeholder="Type reason here...")
+                reason_input = c5.text_input("Reason", key=f"pd_reason_{row['Order_ID']}", placeholder="Enter reason...")
                 if c6.button("Submit", key=f"pd_btn_{row['Order_ID']}"):
                     if reason_input.strip() != "":
-                        if append_saved_remark(row['Order_ID'], row['Store_Name'], "Express Pick/Dispatch Delay", "Express", reason_input.strip()):
+                        if append_saved_remark(row['Order_ID'], row['Store_Name'], "Express Delay", "Express", reason_input.strip()):
                             st.success(f"Saved: {row['Order_ID']}")
                             st.rerun()
                 st.divider()
         else:
-            st.success("🎉 Zero pending Express picking or dispatch delays!")
+            st.success("🎉 Zero pending Express picking or dispatch breaches!")
 
-    # --- TAB 2: DELIVERY DELAYS ---
     with tab_del:
         st.subheader("Delivery Breaches")
         del_breached = filtered_df[
@@ -331,7 +364,7 @@ if has_live_data:
                 c2.write(row['Store_Name'])
                 c3.write(row['Order_Type'])
                 c4.write(f"Rider: {row['Rider_Name']}")
-                reason_input = c5.text_input("Enter Delivery Delay Reason", key=f"d_reason_{row['Order_ID']}", placeholder="Type reason here...")
+                reason_input = c5.text_input("Reason", key=f"d_reason_{row['Order_ID']}", placeholder="Enter reason...")
                 if c6.button("Submit", key=f"d_btn_{row['Order_ID']}"):
                     if reason_input.strip() != "":
                         if append_saved_remark(row['Order_ID'], row['Store_Name'], "Delivery Delay", row['Order_Type'], reason_input.strip()):
@@ -339,12 +372,10 @@ if has_live_data:
                             st.rerun()
                 st.divider()
         else:
-            st.success("🎉 Zero pending delivery delays!")
+            st.success("🎉 Zero pending delivery breaches!")
 
-    # --- TAB 3: RIDER PERFORMANCE & CPO BREAKDOWN ---
     with tab_rider:
         st.subheader("🏍️ Rider Performance & Cost Per Order (CPO)")
-        
         rider_df = filtered_df[filtered_df['Order_Status'] == 'DELIVERED'].copy()
         
         rider_summary = []
@@ -357,31 +388,32 @@ if has_live_data:
             
             exp_r_group = r_group[r_group['Order_Type_Clean'] == 'express']
             avg_transit = exp_r_group['Transit_Duration_Min'].mean() if len(exp_r_group) > 0 else 0.0
-            
             rider_cpo = round(1050.0 / tot_cnt, 2) if tot_cnt > 0 else 0.0
             
             rider_summary.append({
                 'Rider Name': rider,
-                'Express Delivered Orders': exp_cnt,
-                'Standard Delivered Orders': std_cnt,
-                'Total Delivered Orders': tot_cnt,
-                'Express Avg Delivery Time (Min)': f"{avg_transit:.1f} Min",
+                'Express Orders Delivered': exp_cnt,
+                'Standard Orders Delivered': std_cnt,
+                'Total Delivered': tot_cnt,
+                'Express Avg Delivery (Min)': f"{avg_transit:.1f} Min",
                 'Rider CPO (₹)': f"₹{rider_cpo:.2f}"
             })
             
-        st.markdown("##### **Individual Rider Performance & CPO (Fixed ₹1,050 Day Salary)**")
         if rider_summary:
             st.dataframe(pd.DataFrame(rider_summary), use_container_width=True)
         else:
-            st.info("No active rider records found for selected filter.")
+            st.info("No active rider records found.")
 
-# --- HISTORICAL DATA DISPLAY (BEFORE UPLOAD) ---
+# --- HISTORICAL SHEET DISPLAY (WHEN NO UPLOAD) ---
 else:
-    st.title("🌐 Delivery & Fulfillment Historical Dashboard")
-    st.info("💡 Upload `ORDER_STATUS_TRANSITIONS` reports via the sidebar to calculate live metrics.")
-    
     if not kpi_history.empty:
-        st.subheader("📋 Historical Store Performance & CPO")
-        st.dataframe(filter_kpi_history(kpi_history), use_container_width=True)
+        # Filter KPI history dataframe by date
+        filtered_hist = kpi_history[
+            (kpi_history['Date'].dt.date >= start_date) & 
+            (kpi_history['Date'].dt.date <= end_date)
+        ].copy()
+        
+        # Display clean formatted table
+        st.dataframe(filtered_hist, use_container_width=True)
     else:
-        st.warning("No historical performance data saved yet. Upload your first report from the sidebar to store KPIs!")
+        st.warning("No saved performance data available yet. Please upload a report using the sidebar.")
