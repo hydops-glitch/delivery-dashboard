@@ -46,13 +46,11 @@ def save_daily_kpis(kpi_df):
         client = get_gspread_client()
         sheet_id = st.secrets["sheets"]["spreadsheet_id"]
         sheet = client.open_by_key(sheet_id).worksheet("Daily_KPIs")
-        
-        # Clear existing data and rewrite full updated historical trends
         sheet.clear()
         sheet.update([kpi_df.columns.values.tolist()] + kpi_df.values.tolist())
         return True
     except Exception as e:
-        st.error(f"Error saving KPIs to Google Sheets: {e}")
+        st.error(f"Error saving KPIs: {e}")
         return False
 
 def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reason):
@@ -70,7 +68,11 @@ def append_saved_remark(order_id, store_name, delay_type, order_type, delay_reas
         st.error(f"Error saving remark: {e}")
         return False
 
-# --- SIDEBAR UPLOADER ---
+# --- URL QUERY PARAMS FOR STORE ACCESS CONTROL ---
+query_params = st.query_params
+url_store = query_params.get("store", None)
+
+# --- SIDEBAR CONTROLS ---
 st.sidebar.header("📂 Data Controls")
 st.sidebar.markdown("Upload daily reports to calculate metrics & log delays.")
 
@@ -85,7 +87,6 @@ if picklist_files and transaction_file:
     master_df = process_and_merge_reports(picklist_files, transaction_file)
     st.session_state['master_df'] = master_df
     
-    # Calculate daily aggregate KPIs to store persistently
     daily_summary = []
     for (order_date, store), group in master_df.groupby([master_df['Order_Placing_Time'].dt.date, 'Store_Name']):
         exp_group = group[group['Order Type'].str.lower() == 'express']
@@ -112,34 +113,45 @@ if picklist_files and transaction_file:
     new_kpi_df = pd.DataFrame(daily_summary)
     existing_kpi_df = load_saved_kpis()
     
-    # Combine existing Google Sheets KPIs with new data and deduplicate
     if not existing_kpi_df.empty:
         combined_kpis = pd.concat([existing_kpi_df, new_kpi_df]).drop_duplicates(subset=['Date', 'Store_Name'], keep='last')
     else:
         combined_kpis = new_kpi_df
         
     save_daily_kpis(combined_kpis)
-    st.sidebar.success("Reports processed & KPIs updated in Google Sheets!")
+    st.sidebar.success("Reports processed & KPIs saved to Google Sheets!")
 
-# ACTIVE DATA VIEW (WHEN FILES ARE UPLOADING / IN SESSION)
+# --- MAIN DASHBOARD VIEW ---
 if 'master_df' in st.session_state:
     master_df = st.session_state['master_df']
+    all_stores_list = sorted(list(master_df['Store_Name'].unique()))
     
-    col_store, col_filter_type, col_picker = st.columns([2, 2, 3])
-    stores = ['All Stores (HYD Region)'] + sorted(list(master_df['Store_Name'].unique()))
+    col_view, col_store, col_filter_type, col_picker = st.columns([2, 2, 2, 3])
     
-    with col_store:
-        selected_store = st.selectbox("🏬 Select Store / Location", stores)
-    
-    if selected_store != 'All Stores (HYD Region)':
+    # Store Link Access Restriction Logic
+    if url_store and url_store in all_stores_list:
+        selected_view = "Store-Level View"
+        selected_store = url_store
+        st.info(f"🔒 Access Restricted View: **{selected_store}**")
+    else:
+        with col_view:
+            selected_view = st.radio("👁️ View Mode", ["Overall Region View", "Store-Level View"], horizontal=True)
+            
+        with col_store:
+            if selected_view == "Store-Level View":
+                selected_store = st.selectbox("🏬 Select Store", all_stores_list)
+            else:
+                selected_store = "All Stores (HYD Region)"
+
+    if selected_view == "Store-Level View":
         filtered_df = master_df[master_df['Store_Name'] == selected_store].copy()
         header_title = f"🏬 Store Performance: {selected_store}"
     else:
         filtered_df = master_df.copy()
-        header_title = "🌐 HYD Region Performance Overview"
+        header_title = "🌐 HYD Region Overall Performance Overview"
         
     with col_filter_type:
-        date_filter_mode = st.radio("📅 Date Filter Mode", ["Reporting Cycle", "Custom Date Range"], horizontal=True)
+        date_filter_mode = st.radio("📅 Date Filter", ["Reporting Cycle", "Custom Range"], horizontal=True)
         
     today_day = datetime.date.today().day
     default_cycle_idx = 0 if today_day <= 7 else (1 if today_day <= 14 else (2 if today_day <= 21 else 3))
@@ -171,6 +183,7 @@ if 'master_df' in st.session_state:
     st.title(header_title)
     st.markdown("---")
 
+    # --- KPI HIGHLIGHTS ---
     st.subheader("🎯 KPI Highlights")
     exp_df = filtered_df[filtered_df['Order Type'].str.lower() == 'express']
     sched_df = filtered_df[filtered_df['Order Type'].str.lower() != 'express']
@@ -180,14 +193,15 @@ if 'master_df' in st.session_state:
     sched_del_pct = (sched_df['On Time Delivered'].sum() / len(sched_df) * 100) if len(sched_df) > 0 else 0
     
     num_days = max((filtered_df['Order_Placing_Time'].dt.date.nunique()), 1)
-    self_orders_avg = (filtered_df['Rider_Channel'] == 'Self (In-House)').sum() / num_days
-    tpl_orders_avg = (filtered_df['Rider_Channel'] == '3PL Partner').sum() / num_days
+    total_orders_avg = round(len(filtered_df) / num_days)
+    self_orders_avg = round((filtered_df['Rider_Channel'] == 'Self (In-House)').sum() / num_days)
+    tpl_orders_avg = round((filtered_df['Rider_Channel'] == '3PL Partner').sum() / num_days)
     
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Express Packed SLA (≤3m)", f"{exp_packed_pct:.1f}%")
     k2.metric("Express Delivered %", f"{exp_del_pct:.1f}%")
     k3.metric("Scheduled Delivered %", f"{sched_del_pct:.1f}%")
-    k4.metric("Avg Orders (Self / 3PL)", f"{self_orders_avg:.0f} / {tpl_orders_avg:.0f} per day")
+    k4.metric("Avg Daily Orders (Total)", f"{total_orders_avg:,} / day", help=f"Self: {self_orders_avg} | 3PL: {tpl_orders_avg}")
 
     st.markdown("---")
 
@@ -198,7 +212,7 @@ if 'master_df' in st.session_state:
     ])
     
     with tab_pick:
-        st.subheader("Express Packing Breaches (Only Express)")
+        st.subheader("Express Packing Breaches")
         exp_pick_breached = exp_df[
             (exp_df['Pick_SLA_Met'] == 0) & 
             (~exp_df['Order_ID'].astype(str).isin(saved_order_ids))
@@ -221,7 +235,7 @@ if 'master_df' in st.session_state:
             st.success("🎉 Zero pending Express packing delays!")
 
     with tab_del:
-        st.subheader("Delivery Breaches (Express & Scheduled)")
+        st.subheader("Delivery Breaches")
         del_breached = filtered_df[
             (filtered_df['On Time Delivered'] == 0) & 
             (~filtered_df['Order_ID'].astype(str).isin(saved_order_ids))
@@ -252,16 +266,28 @@ if 'master_df' in st.session_state:
         else:
             st.info("No saved remarks found in Google Sheets yet.")
 
-# HISTORICAL VIEW (DEFAULT LANDING VIEW WHEN NO FILE IS UPLOADED IN SESSION)
+# HISTORICAL VIEW (DEFAULT LANDING VIEW)
 else:
     st.title("🌐 Delivery & Fulfillment Historical Performance")
-    st.info("💡 Displaying historical performance trends from Google Sheets. Upload fresh reports via the sidebar to calculate new daily metrics.")
+    st.info("💡 Displaying historical performance trends. Upload fresh daily reports via the sidebar to process new orders.")
     
     kpi_history = load_saved_kpis()
     
     if not kpi_history.empty:
-        stores = ['All Stores (HYD Region)'] + sorted(list(kpi_history['Store_Name'].unique()))
-        selected_hist_store = st.selectbox("🏬 Select Store / Location", stores)
+        all_hist_stores = sorted(list(kpi_history['Store_Name'].unique()))
+        
+        if url_store and url_store in all_hist_stores:
+            selected_hist_store = url_store
+            st.info(f"🔒 Access Restricted View: **{selected_hist_store}**")
+        else:
+            h_col1, h_col2 = st.columns([2, 2])
+            with h_col1:
+                hist_view_mode = st.radio("👁️ View Mode", ["Overall Region View", "Store-Level View"], horizontal=True)
+            with h_col2:
+                if hist_view_mode == "Store-Level View":
+                    selected_hist_store = st.selectbox("🏬 Select Store", all_hist_stores)
+                else:
+                    selected_hist_store = "All Stores (HYD Region)"
         
         if selected_hist_store != 'All Stores (HYD Region)':
             filtered_kpi = kpi_history[kpi_history['Store_Name'] == selected_hist_store]
@@ -273,13 +299,16 @@ else:
         exp_pack_avg = filtered_kpi['Express_Packed_SLA'].mean() if not filtered_kpi.empty else 0
         exp_del_avg = filtered_kpi['Express_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
         sched_del_avg = filtered_kpi['Scheduled_Delivered_SLA'].mean() if not filtered_kpi.empty else 0
+        
         total_vol = filtered_kpi['Total_Orders'].sum() if not filtered_kpi.empty else 0
+        total_self = filtered_kpi['Self_Orders'].sum() if not filtered_kpi.empty else 0
+        total_tpl = filtered_kpi['TPL_Orders'].sum() if not filtered_kpi.empty else 0
         
         hk1, hk2, hk3, hk4 = st.columns(4)
         hk1.metric("Avg Express Packed SLA", f"{exp_pack_avg:.1f}%")
         hk2.metric("Avg Express Delivered SLA", f"{exp_del_avg:.1f}%")
         hk3.metric("Avg Scheduled Delivered SLA", f"{sched_del_avg:.1f}%")
-        hk4.metric("Total Historical Orders", f"{total_vol:,}")
+        hk4.metric("Total Volume (Self / 3PL)", f"{total_vol:,}", help=f"Self: {total_self:,} | 3PL: {total_tpl:,}")
         
         st.markdown("---")
         st.subheader("📋 Historical Daily KPI Table")
