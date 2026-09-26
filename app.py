@@ -63,32 +63,29 @@ st.markdown("""
 DAILY_RIDER_COST = 1050.0
 SHEET_ID = "1RUxzJbHW7HHUxbT2sJzNvBrNatLsvgBss6W86CdgMzo"
 
-# Target SLA Definitions
 TARGET_EXPRESS_PACK = 99.0
 TARGET_EXPRESS_DISPATCH = 95.0
 TARGET_EXPRESS_DELIVERY = 95.0
 TARGET_STANDARD_DELIVERY = 99.0
 
 APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
-
-# Default Access Passwords
 MANAGER_PASSWORD = "Manager@Meatigo2026"
 STORE_PASSWORD = "Meatigo@2026"
 
 # ==========================================
-# 2. STATE & REMARKS DATA PERSISTENCE
+# 2. STATE & DATA LOADING
 # ==========================================
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 
-if "remarks_data" not in st.session_state:
-    st.session_state["remarks_data"] = pd.DataFrame(columns=[
+if "shared_remarks" not in st.session_state:
+    st.session_state["shared_remarks"] = pd.DataFrame(columns=[
         'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
         'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
         'Status', 'Manager Feedback', 'Submitted By'
     ])
 
-# Login Interface
+# Login Form (Session Preserved On Refresh)
 if not st.session_state["user_email"]:
     st.title("🥩 Meatigo Operations Portal")
     st.subheader("Authorized Personnel Login")
@@ -125,9 +122,6 @@ if not st.session_state["user_email"]:
 
 user_email = st.session_state["user_email"].strip().lower()
 
-# ==========================================
-# 3. DATA ENGINE & DYNAMIC STORE MAPPING
-# ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
     z = str(zone_str).lower().strip()
@@ -138,7 +132,7 @@ def parse_zone_minutes(zone_str):
     if '2.5' in z or '150' in z: return 150.0
     return 45.0
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=15)
 def load_all_data():
     raw_orders_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Raw_Orders"
     delay_remarks_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Delay_Remarks"
@@ -192,13 +186,15 @@ def load_all_data():
 
 try:
     orders_df, fetched_remarks, mapping_df = load_all_data()
-    if st.session_state["remarks_data"].empty and not fetched_remarks.empty:
-        st.session_state["remarks_data"] = fetched_remarks
+    
+    # Merge remote delay_remarks with session store entries
+    if not fetched_remarks.empty:
+        combined_df = pd.concat([fetched_remarks, st.session_state["shared_remarks"]]).drop_duplicates(subset=['Order ID', 'Stage'], keep='last')
+        st.session_state["shared_remarks"] = combined_df
 except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
-# Mapping user scope
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 
 if not user_mapping.empty:
@@ -225,12 +221,10 @@ else:
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "hyd ops"]) else raw_name
 
-# Helper Functions for Remark Submissions & Approvals
 def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, reason):
-    df = st.session_state["remarks_data"].copy()
+    df = st.session_state["shared_remarks"].copy()
     str_order_id = str(order_id).strip()
     
-    # Check if entry already exists (by String ID & Stage)
     idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
     
     new_entry = {
@@ -252,19 +246,19 @@ def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, rea
     else:
         df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
         
-    st.session_state["remarks_data"] = df
+    st.session_state["shared_remarks"] = df
 
 def update_manager_action(order_id, stage, new_status, feedback=""):
-    df = st.session_state["remarks_data"].copy()
+    df = st.session_state["shared_remarks"].copy()
     str_order_id = str(order_id).strip()
     idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
     if not idx.empty:
         df.loc[idx, 'Status'] = new_status
         df.loc[idx, 'Manager Feedback'] = feedback
-    st.session_state["remarks_data"] = df
+    st.session_state["shared_remarks"] = df
 
 # ==========================================
-# 4. SIDEBAR NAVIGATION
+# 3. SIDEBAR & NAVIGATION
 # ==========================================
 with st.sidebar:
     st.title("🥩 Meatigo Portal")
@@ -273,7 +267,7 @@ with st.sidebar:
         nav_choice = st.radio(
             "Navigation Menu",
             ["📊 Hyd Region Metrics View", "🏪 Store Level View", "🛡️ Manager Audit & Review"],
-            index=0
+            index=2
         )
     else:
         nav_choice = st.radio(
@@ -288,7 +282,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. HEADER BAR & DATE SELECTION
+# 4. HEADER & DATE SELECTOR
 # ==========================================
 top_c1, top_c2 = st.columns([2, 3])
 
@@ -337,7 +331,12 @@ with top_c2:
 
     with d_col3:
         st.markdown("<div style='height: 25px;'></div>", unsafe_allow_html=True)
-        st.button("🔄 Refresh", on_click=st.cache_data.clear)
+        # Refresh without wiping the login session state
+        if st.button("🔄 Refresh"):
+            saved_email = st.session_state.get("user_email")
+            st.cache_data.clear()
+            st.session_state["user_email"] = saved_email
+            st.rerun()
 
 st.divider()
 
@@ -357,11 +356,10 @@ def render_metric_card(col, title, value, target_text, status_type="green"):
     </div>
     """, unsafe_allow_html=True)
 
-# Filter by Date
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
 # ==========================================
-# PAGE 1: HYD REGION / STORE METRICS VIEW
+# PAGE 1: HYD REGION METRICS
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
@@ -399,68 +397,6 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     render_metric_card(r2c2, "STANDARD DELIVERED SLA", f"{std_del_sla:.1f}%", f"{'🟢' if std_del_sla>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", "green" if std_del_sla>=TARGET_STANDARD_DELIVERY else "red")
     render_metric_card(r2c3, "🏍️ RIDER PRODUCTIVITY & FLEET", f"{len(self_orders_df)} Self | {tpl_orders_count} 3PL", f"Active Riders: {active_rider_count} | Avg Delivered: {avg_orders_per_rider:.1f}/Rider", "neutral")
 
-    st.divider()
-
-    ch1, ch2 = st.columns(2)
-    min_trend_dt = end_date - datetime.timedelta(days=6)
-    trend_df = orders_df[(orders_df['Order_Date'] >= min_trend_dt) & (orders_df['Order_Date'] <= end_date)].copy()
-
-    if not trend_df.empty:
-        daily_trend = trend_df.groupby('Order_Date').apply(lambda g: pd.Series({
-            'Pick_SLA': (g[g['Order Type']=='Express']['Pick_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Express']) > 0 else 0.0,
-            'Dispatch_SLA': (g[g['Order Type']=='Express']['Dispatch_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Express']) > 0 else 0.0,
-            'Exp_Del_SLA': (g[g['Order Type']=='Express']['Delivery_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Express']) > 0 else 0.0,
-            'Std_Del_SLA': (g[g['Order Type']=='Standard']['Delivery_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Standard']) > 0 else 0.0
-        })).reset_index()
-    else:
-        daily_trend = pd.DataFrame(columns=['Order_Date', 'Pick_SLA', 'Dispatch_SLA', 'Exp_Del_SLA', 'Std_Del_SLA'])
-
-    with ch1:
-        st.subheader("Packing & Dispatch Trend (7-Day Rolling)")
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Pick_SLA'], name="🟢 Packing SLA % (<=3m)", line=dict(color="green", width=3)))
-        fig1.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Dispatch_SLA'], name="🔴 Dispatch SLA % (<=6m)", line=dict(color="red", width=3)))
-        fig1.update_layout(yaxis_range=[0, 100], margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with ch2:
-        st.subheader("Delivery SLA Trend (7-Day Rolling)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Exp_Del_SLA'], name="⚡ Express Delivery SLA %", line=dict(color="blue", width=3)))
-        fig2.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Std_Del_SLA'], name="Standard Delivery SLA %", line=dict(color="orange", width=3)))
-        fig2.update_layout(yaxis_range=[0, 100], margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.divider()
-
-    st.subheader(f"Store Wise Performance Summary ({start_date} to {end_date})")
-    if not t1_df.empty:
-        summary_rows = []
-        for sname, grp in t1_df.groupby('Store Name'):
-            eg = grp[grp['Order Type'] == 'Express']
-            sg = grp[grp['Order Type'] == 'Standard']
-            
-            p_s = (eg['Pick_SLA_Met'].mean() * 100) if len(eg) > 0 else 0.0
-            d_s = (eg['Dispatch_SLA_Met'].mean() * 100) if len(eg) > 0 else 0.0
-            ex_d = (eg['Delivery_SLA_Met'].mean() * 100) if len(eg) > 0 else 0.0
-            st_d = (sg['Delivery_SLA_Met'].mean() * 100) if len(sg) > 0 else 0.0
-            
-            summary_rows.append({
-                "Store Name": sname,
-                "Total Orders": len(grp),
-                "Express Orders": len(eg),
-                "Standard Orders": len(sg),
-                "Pack SLA": f"{p_s:.1f}%",
-                "Disp SLA": f"{d_s:.1f}%",
-                "Exp Del SLA": f"{ex_d:.1f}%",
-                "Std Del SLA": f"{st_d:.1f}%",
-                "Self Orders": len(grp[grp['Is_Self']]),
-                "3PL Orders": len(grp[~grp['Is_Self']])
-            })
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No orders found for the selected date range.")
-
 # ==========================================
 # PAGE 2: STORE LEVEL VIEW
 # ==========================================
@@ -474,36 +410,11 @@ elif nav_choice == "🏪 Store Level View":
     store_df = orders_range_df[
         orders_range_df['Store Name'].astype(str).str.strip().str.lower() == active_store.strip().lower()
     ].copy()
-    
-    s_exp = store_df[store_df['Order Type'] == 'Express']
-    s_std = store_df[store_df['Order Type'] == 'Standard']
 
-    exp_cnt_store = len(s_exp)
-    std_cnt_store = len(s_std)
-
-    sm1, sm2, sm3, sm4, sm5 = st.columns(5)
-    render_metric_card(sm1, "TOTAL STORE ORDERS", f"{len(store_df)}", f"⚡ Express: {exp_cnt_store} | Standard: {std_cnt_store}", "neutral")
-    
-    p_val = (s_exp['Pick_SLA_Met'].mean()*100) if exp_cnt_store > 0 else 0.0
-    render_metric_card(sm2, "PACK SLA", f"{p_val:.1f}%", f"{'🟢' if p_val>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", "green" if p_val>=TARGET_EXPRESS_PACK else "red")
-
-    d_val = (s_exp['Dispatch_SLA_Met'].mean()*100) if exp_cnt_store > 0 else 0.0
-    render_metric_card(sm3, "DISPATCH SLA", f"{d_val:.1f}%", f"{'🟢' if d_val>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", "green" if d_val>=TARGET_EXPRESS_DISPATCH else "red")
-
-    ex_val = (s_exp['Delivery_SLA_Met'].mean()*100) if exp_cnt_store > 0 else 0.0
-    render_metric_card(sm4, "EXPRESS DEL SLA", f"{ex_val:.1f}%", f"{'🟢' if ex_val>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", "green" if ex_val>=TARGET_EXPRESS_DELIVERY else "red")
-
-    st_val = (s_std['Delivery_SLA_Met'].mean()*100) if std_cnt_store > 0 else 0.0
-    render_metric_card(sm5, "STANDARD DEL SLA", f"{st_val:.1f}%", f"{'🟢' if st_val>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", "green" if st_val>=TARGET_STANDARD_DELIVERY else "red")
-
-    st.divider()
-
-    st.subheader(f"ACTION REQUIRED: PENDING DELAYED ORDERS ({start_date} to {end_date})")
-    
     dt1, dt2, dt3, dt4 = st.tabs(["📦 Packing Delays", "🚚 Dispatch Delays", "🚴 Delivery Delays", "📁 Audit History"])
 
     def render_delay_entry(stage, breach_df):
-        rem_df = st.session_state["remarks_data"]
+        rem_df = st.session_state["shared_remarks"]
         
         active_entries = []
         for idx, row in breach_df.iterrows():
@@ -569,36 +480,12 @@ elif nav_choice == "🏪 Store Level View":
         render_delay_entry("Delivery", del_b)
 
     with dt4:
-        hist = st.session_state["remarks_data"]
+        hist = st.session_state["shared_remarks"]
         hist_filtered = hist[(hist['Store Name'] == active_store)]
         if not hist_filtered.empty:
             st.dataframe(hist_filtered, hide_index=True, use_container_width=True)
         else:
             st.info("No saved remarks found for this store.")
-
-    st.divider()
-
-    st.subheader(f"🏍️ Rider Productivity & Performance ({start_date} to {end_date})")
-    store_self = store_df[store_df['Is_Self']]
-    if not store_self.empty:
-        r_list = []
-        for rname, rgrp in store_self.groupby('Rider Name'):
-            rcnt = len(rgrp)
-            ontime = (rgrp['Delivery_SLA_Met'].mean() * 100) if rcnt > 0 else 0.0
-            avg_t = rgrp['Delivery_Mins'].mean() if rcnt > 0 else 0.0
-            cpo = DAILY_RIDER_COST / rcnt if rcnt > 0 else 0.0
-            
-            r_list.append({
-                "Rider Name": rname,
-                "Active Status": "ACTIVE",
-                "Self Orders": f"{rcnt} Orders",
-                "On-Time Del %": f"{ontime:.1f}%",
-                "Avg Delivery Time": f"{avg_t:.1f} mins",
-                "CPO (Cost/Order)": f"₹{cpo:.2f}"
-            })
-        st.dataframe(pd.DataFrame(r_list), use_container_width=True, hide_index=True)
-    else:
-        st.info("No self-rider order logs found for this date range.")
 
 # ==========================================
 # PAGE 3: MANAGER AUDIT VIEW
@@ -607,7 +494,7 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
     st.title("🛡️ Manager Audit & Review View")
     st.caption("Review submitted store delay remarks")
     
-    rem_df = st.session_state["remarks_data"]
+    rem_df = st.session_state["shared_remarks"]
     
     if not rem_df.empty and 'Status' in rem_df.columns:
         pending_items = rem_df[rem_df['Status'].astype(str).str.upper().str.strip() == 'PENDING']
