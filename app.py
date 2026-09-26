@@ -14,12 +14,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for UI Layout, Bounded Borders, and Metric Cards
 st.markdown("""
 <style>
     .main { background-color: #f8fafc; padding: 10px; }
     
-    /* Bounded Card Box UI */
     .metric-card {
         background-color: #ffffff;
         border: 1.5px solid #cbd5e1;
@@ -45,26 +43,9 @@ st.markdown("""
         line-height: 1.1;
     }
     
-    .metric-target-green {
-        font-size: 12px;
-        font-weight: 600;
-        color: #16a34a;
-        margin-top: 6px;
-    }
-    
-    .metric-target-red {
-        font-size: 12px;
-        font-weight: 600;
-        color: #dc2626;
-        margin-top: 6px;
-    }
-
-    .metric-target-neutral {
-        font-size: 12px;
-        font-weight: 600;
-        color: #0284c7;
-        margin-top: 6px;
-    }
+    .metric-target-green { font-size: 12px; font-weight: 600; color: #16a34a; margin-top: 6px; }
+    .metric-target-red { font-size: 12px; font-weight: 600; color: #dc2626; margin-top: 6px; }
+    .metric-target-neutral { font-size: 12px; font-weight: 600; color: #0284c7; margin-top: 6px; }
 
     .user-header-badge {
         font-size: 13px;
@@ -77,7 +58,6 @@ st.markdown("""
         display: inline-block;
     }
 
-    /* Page Bounded Outer Box */
     .page-container {
         border: 1.5px solid #cbd5e1;
         border-radius: 12px;
@@ -99,13 +79,23 @@ TARGET_STANDARD_DELIVERY = 99.0
 
 APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 
+# SECURE PASSWORD MAP FOR BACKUP AUTH
+# Store team passwords ensure unauthorized access to manager roles is prevented
+USER_PASSWORDS = {
+    "hyd_ops@prasuma.com": "Manager@Meatigo2026",
+    "sreekanth@prasuma.com": "Manager@Meatigo2026",
+    "bhills_ops@prasuma.com": "Store@BHills2026",
+    "gachibowli_ops@prasuma.com": "Store@Gachi2026",
+    "kondapur_ops@prasuma.com": "Store@Konda2026"
+}
+
 # ==========================================
-# 2. HYBRID AUTHENTICATION SYSTEM (SSO & SESSION)
+# 2. SECURE AUTHENTICATION ENGINE
 # ==========================================
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 
-# Check for Streamlit Native SSO Context
+# Native Google SSO Check
 try:
     if hasattr(st, "user") and getattr(st.user, "is_logged_in", False):
         st.session_state["user_email"] = st.user.email
@@ -114,51 +104,56 @@ try:
 except Exception:
     pass
 
-# Login UI if user is unauthenticated
 if not st.session_state["user_email"]:
     st.title("🥩 Meatigo Operations Portal")
-    st.subheader("Google Single Sign-On (SSO) & Portal Login")
-    st.info("Please authenticate using your official company Google Account (@prasuma.com or @meatigo.com).")
+    st.subheader("Authorized Personnel Login")
+    
+    col_sso, col_pass = st.columns([1, 1])
 
-    auth_col1, auth_col2 = st.columns([1, 1])
-
-    with auth_col1:
-        st.markdown("### Method 1: Streamlit SSO")
+    with col_sso:
+        st.markdown("### Method 1: Google SSO (Recommended)")
+        st.caption("Click below to log in directly with your @prasuma.com Google Workspace Account.")
         if st.button("🔐 Login with Google SSO", type="primary"):
             try:
                 st.login("google")
-            except Exception as auth_err:
-                st.error("Google OAuth secrets are not configured in your Streamlit Cloud deployment dashboard. Use Method 2 below.")
+            except Exception:
+                st.error("Google OAuth is not configured in Streamlit Secrets yet. Use Password Login on the right.")
 
-    with auth_col2:
-        st.markdown("### Method 2: Manual Email Login")
-        with st.form("manual_auth_form"):
-            entered_email = st.text_input("Enter Company Email", placeholder="hyd_ops@prasuma.com")
-            submit_login = st.form_submit_button("Access Portal")
+    with col_pass:
+        st.markdown("### Method 2: Secured Email & Password")
+        with st.form("secure_login_form"):
+            email_in = st.text_input("Company Email", placeholder="hyd_ops@prasuma.com")
+            pass_in = st.text_input("Access Password / PIN", type="password")
+            submit_btn = st.form_submit_button("Authenticate")
             
-            if submit_login and entered_email:
-                clean_email = entered_email.strip().lower()
-                if any(clean_email.endswith(dom) for dom in APPROVED_DOMAINS):
-                    st.session_state["user_email"] = clean_email
-                    st.success("Authentication Successful!")
+            if submit_btn:
+                clean_e = email_in.strip().lower()
+                if not any(clean_e.endswith(dom) for dom in APPROVED_DOMAINS):
+                    st.error("Invalid Domain: Use official @prasuma.com or @meatigo.com email.")
+                elif clean_e in USER_PASSWORDS and USER_PASSWORDS[clean_e] == pass_in:
+                    st.session_state["user_email"] = clean_e
+                    st.success("Access Granted!")
+                    st.rerun()
+                elif clean_e not in USER_PASSWORDS and pass_in == "Meatigo@2026":  # Fallback master store password
+                    st.session_state["user_email"] = clean_e
+                    st.success("Access Granted!")
                     st.rerun()
                 else:
-                    st.error("Access Denied: Email domain must be @prasuma.com or @meatigo.com")
+                    st.error("Invalid Email or Password! Access Denied.")
 
     st.stop()
 
 user_email = st.session_state["user_email"].strip().lower()
 
-# Verify Domain Access
 if not any(user_email.endswith(domain) for domain in APPROVED_DOMAINS):
-    st.error(f"Access Denied: Email '{user_email}' is not authorized.")
+    st.error(f"Access Denied: {user_email} is not authorized.")
     if st.button("Logout"):
         st.session_state.clear()
         st.rerun()
     st.stop()
 
 # ==========================================
-# 3. DATA ENGINE & CACHING
+# 3. DATA ENGINE
 # ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
@@ -178,12 +173,10 @@ def load_all_data():
 
     raw_df = pd.read_csv(raw_orders_url)
     
-    # Exclude cancelled orders
     df = raw_df[~raw_df['Order Status'].astype(str).str.upper().isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
     if 'Was Cancelled' in df.columns:
         df = df[df['Was Cancelled'].astype(str).str.upper() != 'TRUE']
 
-    # Date parsing
     if 'Order date time' in df.columns:
         df['Parsed_DateTime'] = pd.to_datetime(df['Order date time'], errors='coerce')
     else:
@@ -199,7 +192,6 @@ def load_all_data():
     df['Delivery_Partner_Norm'] = df['Delivery Partner'].fillna('').astype(str).str.strip().str.upper()
     df['Is_Self'] = df['Delivery_Partner_Norm'] == 'SELF'
     
-    # Compute SLAs
     has_inpick = df['InPicking Time'].notna() & (df['InPicking Time'] <= df['Packed Time'])
     df['Pick_Start'] = np.where(has_inpick, df['InPicking Time'], df['Placed Time'])
     df['Pick_Mins'] = (df['Packed Time'] - df['Pick_Start']).dt.total_seconds() / 60.0
@@ -271,7 +263,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. HEADER BAR & DATE RANGE SELECTION
+# 5. HEADER BAR & DATE RANGE CONTROLS
 # ==========================================
 top_c1, top_c2 = st.columns([2, 3])
 
@@ -340,7 +332,6 @@ def render_metric_card(col, title, value, target_text, status_type="green"):
     </div>
     """, unsafe_allow_html=True)
 
-# Active Date-Filtered Dataset
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
 # ==========================================
@@ -355,20 +346,17 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     exp_t1 = t1_df[t1_df['Order Type'] == 'Express']
     std_t1 = t1_df[t1_df['Order Type'] == 'Standard']
 
-    # Compute SLAs
     exp_pack_sla = (exp_t1['Pick_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
     exp_disp_sla = (exp_t1['Dispatch_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
     exp_del_sla = (exp_t1['Delivery_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
     std_del_sla = (std_t1['Delivery_SLA_Met'].mean() * 100) if len(std_t1) > 0 else 0.0
 
-    # Rider Fleet Metrics
     self_orders_df = t1_df[t1_df['Is_Self']]
     tpl_orders_count = len(t1_df) - len(self_orders_df)
     unique_riders = self_orders_df['Rider Name'].dropna().unique() if 'Rider Name' in self_orders_df.columns else []
     active_rider_count = len(unique_riders)
     avg_orders_per_rider = (len(self_orders_df) / active_rider_count) if active_rider_count > 0 else 0.0
 
-    # METRICS GRID WITH RIDER PRODUCTIVITY CARD
     r1c1, r1c2, r1c3, r1c4 = st.columns(4)
     render_metric_card(r1c1, "TOTAL ORDERS PLACED", f"{len(t1_df)}", f"Range: {start_date} to {end_date}", "neutral")
     render_metric_card(r1c2, "DELIVERED ORDERS", f"{len(t1_df[t1_df['Order Status'] == 'DELIVERED'])}", "Completed Deliveries", "green")
@@ -382,7 +370,6 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
 
     st.divider()
 
-    # Bounded Rolling Charts Panel
     st.markdown('<div class="page-container">', unsafe_allow_html=True)
     ch1, ch2 = st.columns(2)
     
@@ -418,7 +405,6 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
 
     st.divider()
 
-    # Bounded Store Summary Table Panel
     st.markdown('<div class="page-container">', unsafe_allow_html=True)
     st.subheader(f"Store Wise Performance Summary ({start_date} to {end_date})")
     if not t1_df.empty:
@@ -461,7 +447,6 @@ elif nav_choice == "🏪 Store Level View":
     s_exp = store_df[store_df['Order Type'] == 'Express']
     s_std = store_df[store_df['Order Type'] == 'Standard']
 
-    # STORE METRICS CARDS
     sm1, sm2, sm3, sm4, sm5 = st.columns(5)
     render_metric_card(sm1, "TOTAL STORE ORDERS", f"{len(store_df)}", f"{start_date} to {end_date}", "neutral")
     
@@ -479,7 +464,6 @@ elif nav_choice == "🏪 Store Level View":
 
     st.divider()
 
-    # ACTION REQUIRED: DELAY REMARKS TABS
     st.subheader(f"ACTION REQUIRED: PENDING DELAYED ORDERS ({start_date} to {end_date})")
     
     dt1, dt2, dt3, dt4 = st.tabs(["📦 Packing Delays", "🚚 Dispatch Delays", "🚴 Delivery Delays", "📁 Audit History"])
@@ -528,7 +512,6 @@ elif nav_choice == "🏪 Store Level View":
 
     st.divider()
 
-    # RIDER PRODUCTIVITY PERFORMANCE TABLE
     st.subheader(f"🏍️ Rider Productivity & Performance ({start_date} to {end_date})")
     store_self = store_df[store_df['Is_Self']]
     if not store_self.empty:
