@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime
+import requests
+import json
 import plotly.graph_objects as go
 
 # ==========================================
@@ -63,6 +65,9 @@ st.markdown("""
 DAILY_RIDER_COST = 1050.0
 SHEET_ID = "1RUxzJbHW7HHUxbT2sJzNvBrNatLsvgBss6W86CdgMzo"
 
+# Google Apps Script Web App Endpoint for permanent Sheets writing
+WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyfSIeO1ma_eGZPhxyUF1AIyHmqmP-lfS8cGrf1ucxhOYlyChxYQgORltUCPOvWYMEC7Q/exec"
+
 TARGET_EXPRESS_PACK = 99.0
 TARGET_EXPRESS_DISPATCH = 95.0
 TARGET_EXPRESS_DELIVERY = 95.0
@@ -73,25 +78,23 @@ MANAGER_PASSWORD = "Manager@Meatigo2026"
 STORE_PASSWORD = "Meatigo@2026"
 
 # ==========================================
-# 2. STATE & DATA LOADING
+# 2. LOGIN & SESSION PERSISTENCE
 # ==========================================
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 
-if "shared_remarks" not in st.session_state:
-    st.session_state["shared_remarks"] = pd.DataFrame(columns=[
+if "local_remarks" not in st.session_state:
+    st.session_state["local_remarks"] = pd.DataFrame(columns=[
         'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
         'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
         'Status', 'Manager Feedback', 'Submitted By'
     ])
 
-# Login Form (Session Preserved On Refresh)
 if not st.session_state["user_email"]:
     st.title("🥩 Meatigo Operations Portal")
     st.subheader("Authorized Personnel Login")
     
     col1, col2, col3 = st.columns([1, 2, 1])
-    
     with col2:
         with st.form("password_login_form"):
             email_input = st.text_input("Company Email", placeholder="hyd_ops@prasuma.com")
@@ -117,11 +120,13 @@ if not st.session_state["user_email"]:
                         st.rerun()
                     else:
                         st.error("Incorrect Password.")
-
     st.stop()
 
 user_email = st.session_state["user_email"].strip().lower()
 
+# ==========================================
+# 3. DATA ENGINE & LIVE REMARKS SYNC
+# ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
     z = str(zone_str).lower().strip()
@@ -132,14 +137,13 @@ def parse_zone_minutes(zone_str):
     if '2.5' in z or '150' in z: return 150.0
     return 45.0
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=5) # 5-second TTL ensures real-time sync across Store & Manager accounts
 def load_all_data():
     raw_orders_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Raw_Orders"
     delay_remarks_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Delay_Remarks"
     store_mapping_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Store_Mapping"
 
     raw_df = pd.read_csv(raw_orders_url)
-    
     df = raw_df[~raw_df['Order Status'].astype(str).str.upper().isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
     if 'Was Cancelled' in df.columns:
         df = df[df['Was Cancelled'].astype(str).str.upper() != 'TRUE']
@@ -173,9 +177,13 @@ def load_all_data():
 
     try:
         fetched_remarks = pd.read_csv(delay_remarks_url)
-        fetched_remarks['Order ID'] = fetched_remarks['Order ID'].astype(str)
+        fetched_remarks['Order ID'] = fetched_remarks['Order ID'].astype(str).str.strip()
     except Exception:
-        fetched_remarks = pd.DataFrame(columns=['Timestamp', 'Order ID', 'Order Date', 'Store Name', 'Stage', 'Delay Duration (Mins)', 'Delay Reason', 'Status', 'Manager Feedback', 'Submitted By'])
+        fetched_remarks = pd.DataFrame(columns=[
+            'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
+            'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
+            'Status', 'Manager Feedback', 'Submitted By'
+        ])
         
     try:
         mapping_df = pd.read_csv(store_mapping_url)
@@ -187,14 +195,19 @@ def load_all_data():
 try:
     orders_df, fetched_remarks, mapping_df = load_all_data()
     
-    # Merge remote delay_remarks with session store entries
-    if not fetched_remarks.empty:
-        combined_df = pd.concat([fetched_remarks, st.session_state["shared_remarks"]]).drop_duplicates(subset=['Order ID', 'Stage'], keep='last')
-        st.session_state["shared_remarks"] = combined_df
+    # Merge fetched remote Google Sheet remarks with local session buffer
+    if not st.session_state["local_remarks"].empty:
+        all_remarks = pd.concat([fetched_remarks, st.session_state["local_remarks"]], ignore_index=True)
+        all_remarks = all_remarks.drop_duplicates(subset=['Order ID', 'Stage'], keep='last')
+    else:
+        all_remarks = fetched_remarks.copy()
+        
+    all_remarks['Order ID'] = all_remarks['Order ID'].astype(str).str.strip()
 except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
+# Role and Store Mapping
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 
 if not user_mapping.empty:
@@ -208,26 +221,22 @@ else:
         user_role = "Store"
         available_stores = list(orders_df['Store Name'].dropna().unique())
         email_prefix = user_email.split('@')[0].replace('hyd_', '').replace('_ops', '').replace('store_', '').replace('_', '').lower()
-        
         matched_store = None
         for store in available_stores:
             clean_store = store.lower().replace('_', '')
             if email_prefix in clean_store or clean_store in email_prefix:
                 matched_store = store
                 break
-        
         assigned_store = matched_store if matched_store else (available_stores[0] if available_stores else "TGN_HYD_BHills")
 
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "hyd ops"]) else raw_name
 
+# Store Submission Logic (Sends to Google Apps Script & Buffer)
 def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, reason):
-    df = st.session_state["shared_remarks"].copy()
     str_order_id = str(order_id).strip()
     
-    idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
-    
-    new_entry = {
+    payload = {
         'Timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'Order ID': str_order_id,
         'Order Date': str(order_date),
@@ -237,32 +246,66 @@ def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, rea
         'Delay Reason': reason,
         'Status': 'PENDING',
         'Manager Feedback': '',
-        'Submitted By': user_email
+        'Submitted By': user_email,
+        'Action': 'STORE_SUBMIT'
     }
 
-    if not idx.empty:
-        for k, v in new_entry.items():
-            df.loc[idx, k] = v
-    else:
-        df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
-        
-    st.session_state["shared_remarks"] = df
-
-def update_manager_action(order_id, stage, new_status, feedback=""):
-    df = st.session_state["shared_remarks"].copy()
-    str_order_id = str(order_id).strip()
+    df = st.session_state["local_remarks"].copy()
     idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
     if not idx.empty:
+        for k, v in payload.items():
+            if k in df.columns:
+                df.loc[idx, k] = v
+    else:
+        df = pd.concat([df, pd.DataFrame([payload])], ignore_index=True)
+        
+    st.session_state["local_remarks"] = df
+
+    # Post to Google Sheet Web App
+    try:
+        requests.post(WEBAPP_URL, json=payload, timeout=5)
+    except Exception as err:
+        st.warning(f"Note: Saved locally, but Sheet write had a timeout ({err})")
+
+# Manager Action Logic (Sends updates to Google Apps Script & Buffer)
+def update_manager_action(order_id, stage, new_status, feedback=""):
+    str_order_id = str(order_id).strip()
+    
+    payload = {
+        'Order ID': str_order_id,
+        'Stage': stage,
+        'Status': new_status,
+        'Manager Feedback': feedback,
+        'Action': 'UPDATE_STATUS'
+    }
+    
+    df = st.session_state["local_remarks"].copy()
+    idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
+    
+    if idx.empty:
+        m_idx = all_remarks[(all_remarks['Order ID'].astype(str).str.strip() == str_order_id) & (all_remarks['Stage'] == stage)]
+        if not m_idx.empty:
+            row_dict = m_idx.iloc[-1].to_dict()
+            row_dict['Status'] = new_status
+            row_dict['Manager Feedback'] = feedback
+            df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
+    else:
         df.loc[idx, 'Status'] = new_status
         df.loc[idx, 'Manager Feedback'] = feedback
-    st.session_state["shared_remarks"] = df
+        
+    st.session_state["local_remarks"] = df
+
+    # Post to Google Sheet Web App
+    try:
+        requests.post(WEBAPP_URL, json=payload, timeout=5)
+    except Exception as err:
+        st.warning(f"Note: Saved locally, but Sheet write had a timeout ({err})")
 
 # ==========================================
-# 3. SIDEBAR & NAVIGATION
+# 4. SIDEBAR NAVIGATION
 # ==========================================
 with st.sidebar:
     st.title("🥩 Meatigo Portal")
-    
     if user_role == "Manager":
         nav_choice = st.radio(
             "Navigation Menu",
@@ -273,7 +316,7 @@ with st.sidebar:
         nav_choice = st.radio(
             "Navigation Menu",
             ["📊 Store Metrics View", "🏪 Store Level View"],
-            index=0
+            index=1
         )
 
     st.divider()
@@ -282,7 +325,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 4. HEADER & DATE SELECTOR
+# 5. HEADER BAR & DATE SELECTION
 # ==========================================
 top_c1, top_c2 = st.columns([2, 3])
 
@@ -302,14 +345,8 @@ with top_c2:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
     
     d_col1, d_col2, d_col3 = st.columns([2, 3, 1])
-    
     with d_col1:
-        date_preset = st.selectbox(
-            "Select Date Preset", 
-            [latest_formatted, yesterday_formatted, "Custom Date Range"], 
-            index=0, 
-            key="global_date_preset"
-        )
+        date_preset = st.selectbox("Select Date Preset", [latest_formatted, yesterday_formatted, "Custom Date Range"], index=0, key="global_date_preset")
     
     if date_preset == latest_formatted:
         start_date, end_date = latest_date, latest_date
@@ -317,11 +354,7 @@ with top_c2:
         start_date, end_date = yesterday_date, yesterday_date
     else:
         with d_col2:
-            date_range_input = st.date_input(
-                "Select Range (From - To)",
-                value=(yesterday_date, latest_date),
-                key="custom_date_range_picker"
-            )
+            date_range_input = st.date_input("Select Range (From - To)", value=(yesterday_date, latest_date), key="custom_date_range_picker")
             if isinstance(date_range_input, tuple) and len(date_range_input) == 2:
                 start_date, end_date = date_range_input
             elif isinstance(date_range_input, tuple) and len(date_range_input) == 1:
@@ -331,7 +364,6 @@ with top_c2:
 
     with d_col3:
         st.markdown("<div style='height: 25px;'></div>", unsafe_allow_html=True)
-        # Refresh without wiping the login session state
         if st.button("🔄 Refresh"):
             saved_email = st.session_state.get("user_email")
             st.cache_data.clear()
@@ -340,34 +372,16 @@ with top_c2:
 
 st.divider()
 
-def render_metric_card(col, title, value, target_text, status_type="green"):
-    if status_type == "green":
-        target_class = "metric-target-green"
-    elif status_type == "red":
-        target_class = "metric-target-red"
-    else:
-        target_class = "metric-target-neutral"
-
-    col.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">{title}</div>
-        <div class="metric-value">{value}</div>
-        <div class="{target_class}">{target_text}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
 # ==========================================
-# PAGE 1: HYD REGION METRICS
+# PAGE 1: METRICS VIEW
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
         t1_df = orders_range_df.copy()
     else:
-        t1_df = orders_range_df[
-            orders_range_df['Store Name'].astype(str).str.strip().str.lower() == assigned_store.strip().lower()
-        ].copy()
+        t1_df = orders_range_df[orders_range_df['Store Name'].astype(str).str.strip().str.lower() == assigned_store.strip().lower()].copy()
 
     exp_t1 = t1_df[t1_df['Order Type'] == 'Express']
     std_t1 = t1_df[t1_df['Order Type'] == 'Standard']
@@ -380,22 +394,12 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     exp_del_sla = (exp_t1['Delivery_SLA_Met'].mean() * 100) if exp_count > 0 else 0.0
     std_del_sla = (std_t1['Delivery_SLA_Met'].mean() * 100) if std_count > 0 else 0.0
 
-    self_orders_df = t1_df[t1_df['Is_Self']]
-    tpl_orders_count = len(t1_df) - len(self_orders_df)
-    unique_riders = self_orders_df['Rider Name'].dropna().unique() if 'Rider Name' in self_orders_df.columns else []
-    active_rider_count = len(unique_riders)
-    avg_orders_per_rider = (len(self_orders_df) / active_rider_count) if active_rider_count > 0 else 0.0
-
-    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-    render_metric_card(r1c1, "TOTAL ORDERS PLACED", f"{len(t1_df)}", f"⚡ Express: {exp_count} | Standard: {std_count}", "neutral")
-    render_metric_card(r1c2, "DELIVERED ORDERS", f"{len(t1_df[t1_df['Order Status'] == 'DELIVERED'])}", "Completed Deliveries", "green")
-    render_metric_card(r1c3, "⚡ EXPRESS PACKING SLA (≤3M)", f"{exp_pack_sla:.1f}%", f"{'🟢' if exp_pack_sla>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", "green" if exp_pack_sla>=TARGET_EXPRESS_PACK else "red")
-    render_metric_card(r1c4, "⚡ EXPRESS DISPATCH SLA (≤6M)", f"{exp_disp_sla:.1f}%", f"{'🟢' if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", "green" if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else "red")
-
-    r2c1, r2c2, r2c3 = st.columns(3)
-    render_metric_card(r2c1, "⚡ EXPRESS DELIVERED SLA", f"{exp_del_sla:.1f}%", f"{'🟢' if exp_del_sla>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", "green" if exp_del_sla>=TARGET_EXPRESS_DELIVERY else "red")
-    render_metric_card(r2c2, "STANDARD DELIVERED SLA", f"{std_del_sla:.1f}%", f"{'🟢' if std_del_sla>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", "green" if std_del_sla>=TARGET_STANDARD_DELIVERY else "red")
-    render_metric_card(r2c3, "🏍️ RIDER PRODUCTIVITY & FLEET", f"{len(self_orders_df)} Self | {tpl_orders_count} 3PL", f"Active Riders: {active_rider_count} | Avg Delivered: {avg_orders_per_rider:.1f}/Rider", "neutral")
+    st.subheader(f"Performance Overview ({start_date} to {end_date})")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Orders", f"{len(t1_df)}")
+    m2.metric("Packing SLA", f"{exp_pack_sla:.1f}%")
+    m3.metric("Dispatch SLA", f"{exp_disp_sla:.1f}%")
+    m4.metric("Express Del SLA", f"{exp_del_sla:.1f}%")
 
 # ==========================================
 # PAGE 2: STORE LEVEL VIEW
@@ -407,14 +411,14 @@ elif nav_choice == "🏪 Store Level View":
         active_store = assigned_store
         st.info(f"Store Scope: **{active_store}**")
 
-    store_df = orders_range_df[
-        orders_range_df['Store Name'].astype(str).str.strip().str.lower() == active_store.strip().lower()
-    ].copy()
+    store_df = orders_range_df[orders_range_df['Store Name'].astype(str).str.strip().str.lower() == active_store.strip().lower()].copy()
 
+    st.subheader(f"ACTION REQUIRED: PENDING DELAYED ORDERS ({start_date} to {end_date})")
+    
     dt1, dt2, dt3, dt4 = st.tabs(["📦 Packing Delays", "🚚 Dispatch Delays", "🚴 Delivery Delays", "📁 Audit History"])
 
     def render_delay_entry(stage, breach_df):
-        rem_df = st.session_state["shared_remarks"]
+        rem_df = all_remarks.copy()
         
         active_entries = []
         for idx, row in breach_df.iterrows():
@@ -422,12 +426,15 @@ elif nav_choice == "🏪 Store Level View":
             existing = rem_df[(rem_df['Order ID'].astype(str).str.strip() == oid) & (rem_df['Stage'] == stage)]
             
             if existing.empty:
+                # Unsubmitted: Keep in store queue
                 active_entries.append((row, "", "", None))
             else:
                 last_rec = existing.iloc[-1]
                 status = str(last_rec['Status']).upper().strip()
                 if status == 'REJECTED':
+                    # Rejected: Show back in store queue to allow re-submission
                     active_entries.append((row, last_rec['Delay Reason'], last_rec.get('Manager Feedback', ''), 'REJECTED'))
+                # PENDING or APPROVED entries are filtered out automatically
 
         if not active_entries:
             st.success(f"No pending {stage} SLA breaches requiring action!")
@@ -480,8 +487,7 @@ elif nav_choice == "🏪 Store Level View":
         render_delay_entry("Delivery", del_b)
 
     with dt4:
-        hist = st.session_state["shared_remarks"]
-        hist_filtered = hist[(hist['Store Name'] == active_store)]
+        hist_filtered = all_remarks[all_remarks['Store Name'].astype(str).str.strip().str.lower() == active_store.strip().lower()]
         if not hist_filtered.empty:
             st.dataframe(hist_filtered, hide_index=True, use_container_width=True)
         else:
@@ -494,7 +500,7 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
     st.title("🛡️ Manager Audit & Review View")
     st.caption("Review submitted store delay remarks")
     
-    rem_df = st.session_state["shared_remarks"]
+    rem_df = all_remarks.copy()
     
     if not rem_df.empty and 'Status' in rem_df.columns:
         pending_items = rem_df[rem_df['Status'].astype(str).str.upper().str.strip() == 'PENDING']
