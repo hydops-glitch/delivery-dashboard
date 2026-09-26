@@ -14,32 +14,32 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Bounded Card Boxes & Styled UI
+# Custom CSS for UI Layout, Boundaries, and Styled Card Boxes
 st.markdown("""
 <style>
-    .main { background-color: #f4f6f9; }
+    .main { background-color: #f8fafc; padding: 10px; }
     
-    /* Bounded Metric Card Container */
+    /* Bounded Container Card */
     .metric-card {
         background-color: #ffffff;
-        border: 1px solid #cbd5e1;
-        border-radius: 8px;
-        padding: 14px 18px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        margin-bottom: 12px;
+        border: 1.5px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 16px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+        margin-bottom: 15px;
     }
     
     .metric-title {
         font-size: 11px;
         font-weight: 700;
-        color: #64748b;
+        color: #475569;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.6px;
         margin-bottom: 6px;
     }
     
     .metric-value {
-        font-size: 28px;
+        font-size: 26px;
         font-weight: 800;
         color: #0f172a;
         line-height: 1.1;
@@ -59,14 +59,31 @@ st.markdown("""
         margin-top: 6px;
     }
 
+    .metric-target-neutral {
+        font-size: 12px;
+        font-weight: 600;
+        color: #0284c7;
+        margin-top: 6px;
+    }
+
     .user-header-badge {
         font-size: 13px;
         font-weight: 600;
-        color: #334155;
+        color: #1e293b;
         background: #e2e8f0;
-        padding: 4px 12px;
+        padding: 5px 14px;
         border-radius: 20px;
+        border: 1px solid #cbd5e1;
         display: inline-block;
+    }
+
+    /* Page Outer Container Box */
+    .page-container {
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 20px;
+        background-color: #ffffff;
+        margin-bottom: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -83,54 +100,53 @@ TARGET_STANDARD_DELIVERY = 99.0
 APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 
 # ==========================================
-# 2. SECURE AUTHENTICATION ENGINE
+# 2. GOOGLE OAUTH SSO AUTHENTICATION
 # ==========================================
-# Safe check for Streamlit Cloud User Context or Form Authentication
-if "user_email" not in st.session_state:
-    st.session_state["user_email"] = None
-
-# Fallback check for Streamlit headers if deployed with SSO
-st_email = None
+# Check for native Streamlit user login context
+logged_in_user = None
 try:
-    if hasattr(st, "user") and getattr(st.user, "email", None):
-        st_email = st.user.email
-    elif hasattr(st, "experimental_user") and getattr(st.experimental_user, "email", None):
-        st_email = st.experimental_user.email
+    if hasattr(st, "user") and getattr(st.user, "is_logged_in", False):
+        logged_in_user = st.user.email
+    elif hasattr(st, "experimental_user") and getattr(st.experimental_user, "is_logged_in", False):
+        logged_in_user = st.experimental_user.email
 except Exception:
-    st_email = None
+    logged_in_user = None
 
-if st_email:
-    st.session_state["user_email"] = st_email.strip().lower()
-
-if not st.session_state["user_email"]:
+if not logged_in_user:
     st.title("🥩 Meatigo Operations Portal")
-    st.subheader("Authorized Personnel Login")
+    st.subheader("Google Single Sign-On (SSO) Required")
+    st.info("Please authenticate using your official company Google Account (@prasuma.com or @meatigo.com) to access operational data.")
     
-    with st.form("auth_form"):
-        email_in = st.text_input("Enter Company Email", placeholder="hyd_ops@prasuma.com")
-        submit_btn = st.form_submit_button("Access Portal")
-        
-        if submit_btn:
-            clean_e = email_in.strip().lower()
-            if any(clean_e.endswith(dom) for dom in APPROVED_DOMAINS):
-                st.session_state["user_email"] = clean_e
-                st.success("Access Granted!")
-                st.rerun()
-            else:
-                st.error("Access Denied: Please use an official @prasuma.com or @meatigo.com email.")
-    st.stop()
+    col_sso, _ = st.columns([1, 3])
+    with col_sso:
+        if st.button("🔐 Login with Google SSO", type="primary"):
+            try:
+                st.login("google")
+            except Exception:
+                # Fallback for local testing environments where st.login is unconfigured
+                st.warning("OAuth provider not detected in local environment. Enter email below:")
+                fallback_email = st.text_input("Company Email", placeholder="hyd_ops@prasuma.com")
+                if st.button("Submit Local Email"):
+                    st.session_state["local_user_email"] = fallback_email.strip().lower()
+                    st.rerun()
+    
+    if "local_user_email" in st.session_state:
+        logged_in_user = st.session_state["local_user_email"]
+    else:
+        st.stop()
 
-user_email = st.session_state["user_email"]
+user_email = logged_in_user.strip().lower()
 
 if not any(user_email.endswith(domain) for domain in APPROVED_DOMAINS):
-    st.error(f"Access Denied: {user_email} is not authorized.")
+    st.error(f"Access Denied: Account '{user_email}' is not authorized. Please log in with a @prasuma.com or @meatigo.com email.")
     if st.button("Logout"):
-        st.session_state["user_email"] = None
+        if hasattr(st, "logout"): st.logout()
+        st.session_state.clear()
         st.rerun()
     st.stop()
 
 # ==========================================
-# 3. DATA ENGINE
+# 3. DATA ENGINE & CACHING
 # ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
@@ -150,12 +166,12 @@ def load_all_data():
 
     raw_df = pd.read_csv(raw_orders_url)
     
-    # Exclude cancelled orders
+    # Exclude payment failures and cancellations
     df = raw_df[~raw_df['Order Status'].astype(str).str.upper().isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
     if 'Was Cancelled' in df.columns:
         df = df[df['Was Cancelled'].astype(str).str.upper() != 'TRUE']
 
-    # Date parsing
+    # Parse timestamps
     if 'Order date time' in df.columns:
         df['Parsed_DateTime'] = pd.to_datetime(df['Order date time'], errors='coerce')
     else:
@@ -171,7 +187,7 @@ def load_all_data():
     df['Delivery_Partner_Norm'] = df['Delivery Partner'].fillna('').astype(str).str.strip().str.upper()
     df['Is_Self'] = df['Delivery_Partner_Norm'] == 'SELF'
     
-    # SLAs Calculation
+    # Compute SLAs
     has_inpick = df['InPicking Time'].notna() & (df['InPicking Time'] <= df['Packed Time'])
     df['Pick_Start'] = np.where(has_inpick, df['InPicking Time'], df['Placed Time'])
     df['Pick_Mins'] = (df['Packed Time'] - df['Pick_Start']).dt.total_seconds() / 60.0
@@ -199,10 +215,10 @@ def load_all_data():
 try:
     orders_df, remarks_df, mapping_df = load_all_data()
 except Exception as e:
-    st.error(f"Error loading Google Sheet data: {e}")
+    st.error(f"Data loading error: {e}")
     st.stop()
 
-# Determine User Role and Scope
+# Determine Role and Assigned Scope
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 if not user_mapping.empty:
     user_role = user_mapping.iloc[0]['Role'].strip().title()
@@ -215,7 +231,6 @@ else:
         user_role = "Store"
         assigned_store = "TGN_HYD_BHills"
 
-# Dynamic Greeting Name
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if "sreekanth" in raw_name.lower() or "hyd_ops" in raw_name.lower() else raw_name
 
@@ -240,38 +255,58 @@ with st.sidebar:
 
     st.divider()
     if st.button("🚪 Logout"):
-        st.session_state["user_email"] = None
+        if hasattr(st, "logout"): st.logout()
+        st.session_state.clear()
         st.rerun()
 
 # ==========================================
 # 5. HEADER BAR & DATE RANGE CONTROLS (TOP-RIGHT)
 # ==========================================
-top_c1, top_c2 = st.columns([2, 2])
+top_c1, top_c2 = st.columns([2, 3])
 
 with top_c1:
     greeting = "Good Morning" if datetime.datetime.now().hour < 12 else ("Good Afternoon" if datetime.datetime.now().hour < 17 else "Good Evening")
     st.title(f"{greeting}, {display_name}!")
 
+available_dates = sorted([d for d in orders_df['Order_Date'].dropna().unique()], reverse=True)
+latest_date = available_dates[0] if len(available_dates) > 0 else datetime.date.today()
+yesterday_date = available_dates[1] if len(available_dates) > 1 else latest_date
+
+# Date Label Options with full Day & Date (e.g. Saturday 26 Sep 2026)
+latest_formatted = latest_date.strftime("%A %d %b %Y")
+yesterday_formatted = yesterday_date.strftime("%A %d %b %Y")
+
 with top_c2:
     st.markdown(f"<div style='text-align: right;'><span class='user-header-badge'>👤 {user_email} ({user_role})</span></div>", unsafe_allow_html=True)
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
     
-    d_col1, d_col2, d_col3 = st.columns([2, 2, 1])
+    d_col1, d_col2, d_col3 = st.columns([2, 3, 1])
     
-    available_dates = sorted([d for d in orders_df['Order_Date'].dropna().unique()], reverse=True)
-    today_dt = available_dates[0] if len(available_dates) > 0 else datetime.date.today()
-    yesterday_dt = available_dates[1] if len(available_dates) > 1 else today_dt
-
     with d_col1:
-        date_preset = st.selectbox("Date Range", ["Today", "Yesterday", "Custom"], index=0, key="global_date_preset")
+        date_preset = st.selectbox(
+            "Select Preset / Custom", 
+            [latest_formatted, yesterday_formatted, "Custom Date Range"], 
+            index=0, 
+            key="global_date_preset"
+        )
     
-    if date_preset == "Today":
-        selected_date = today_dt
-    elif date_preset == "Yesterday":
-        selected_date = yesterday_dt
+    if date_preset == latest_formatted:
+        start_date, end_date = latest_date, latest_date
+    elif date_preset == yesterday_formatted:
+        start_date, end_date = yesterday_date, yesterday_date
     else:
         with d_col2:
-            selected_date = st.date_input("Select Date", value=today_dt)
+            date_range_input = st.date_input(
+                "Select Date Range (From - To)",
+                value=(yesterday_date, latest_date),
+                key="custom_date_range_picker"
+            )
+            if isinstance(date_range_input, tuple) and len(date_range_input) == 2:
+                start_date, end_date = date_range_input
+            elif isinstance(date_range_input, tuple) and len(date_range_input) == 1:
+                start_date, end_date = date_range_input[0], date_range_input[0]
+            else:
+                start_date, end_date = latest_date, latest_date
 
     with d_col3:
         st.markdown("<div style='height: 25px;'></div>", unsafe_allow_html=True)
@@ -279,9 +314,15 @@ with top_c2:
 
 st.divider()
 
-# Helper function to generate bounded metric boxes
-def render_metric_card(col, title, value, target_text, is_met=True):
-    target_class = "metric-target-green" if is_met else "metric-target-red"
+# Helper function for bounded metric boxes
+def render_metric_card(col, title, value, target_text, status_type="green"):
+    if status_type == "green":
+        target_class = "metric-target-green"
+    elif status_type == "red":
+        target_class = "metric-target-red"
+    else:
+        target_class = "metric-target-neutral"
+
     col.markdown(f"""
     <div class="metric-card">
         <div class="metric-title">{title}</div>
@@ -290,14 +331,17 @@ def render_metric_card(col, title, value, target_text, is_met=True):
     </div>
     """, unsafe_allow_html=True)
 
+# Filter Data Engine across active date ranges for all tabs
+orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
+
 # ==========================================
 # PAGE 1: HYD REGION METRICS VIEW
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
-        t1_df = orders_df[orders_df['Order_Date'] == selected_date].copy()
+        t1_df = orders_range_df.copy()
     else:
-        t1_df = orders_df[(orders_df['Order_Date'] == selected_date) & (orders_df['Store Name'] == assigned_store)].copy()
+        t1_df = orders_range_df[orders_range_df['Store Name'] == assigned_store].copy()
 
     exp_t1 = t1_df[t1_df['Order Type'] == 'Express']
     std_t1 = t1_df[t1_df['Order Type'] == 'Standard']
@@ -308,22 +352,34 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     exp_del_sla = (exp_t1['Delivery_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
     std_del_sla = (std_t1['Delivery_SLA_Met'].mean() * 100) if len(std_t1) > 0 else 0.0
 
-    # BOUNDED 6-METRIC BOX GRID
-    r1c1, r1c2, r1c3 = st.columns(3)
-    render_metric_card(r1c1, "TOTAL ORDERS PLACED", f"{len(t1_df)}", "All Stores Today", True)
-    render_metric_card(r1c2, "DELIVERED TODAY", f"{len(t1_df[t1_df['Order Status'] == 'DELIVERED'])}", "All Stores Delivered", True)
-    render_metric_card(r1c3, "⚡ EXPRESS PACKING SLA (≤3M)", f"{exp_pack_sla:.1f}%", f"{'🟢' if exp_pack_sla>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", exp_pack_sla>=TARGET_EXPRESS_PACK)
+    # Rider & Partner Logistics Breakdown
+    self_orders_df = t1_df[t1_df['Is_Self']]
+    tpl_orders_count = len(t1_df) - len(self_orders_df)
+    
+    unique_riders = self_orders_df['Rider Name'].dropna().unique() if 'Rider Name' in self_orders_df.columns else []
+    active_rider_count = len(unique_riders)
+    avg_orders_per_rider = (len(self_orders_df) / active_rider_count) if active_rider_count > 0 else 0.0
+
+    # BOUNDED METRIC GRID WITH RIDER PRODUCTIVITY CARD
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    render_metric_card(r1c1, "TOTAL ORDERS PLACED", f"{len(t1_df)}", f"Range: {start_date} to {end_date}", "neutral")
+    render_metric_card(r1c2, "DELIVERED ORDERS", f"{len(t1_df[t1_df['Order Status'] == 'DELIVERED'])}", "Completed Deliveries", "green")
+    render_metric_card(r1c3, "⚡ EXPRESS PACKING SLA (≤3M)", f"{exp_pack_sla:.1f}%", f"{'🟢' if exp_pack_sla>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", "green" if exp_pack_sla>=TARGET_EXPRESS_PACK else "red")
+    render_metric_card(r1c4, "⚡ EXPRESS DISPATCH SLA (≤6M)", f"{exp_disp_sla:.1f}%", f"{'🟢' if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", "green" if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else "red")
 
     r2c1, r2c2, r2c3 = st.columns(3)
-    render_metric_card(r2c1, "⚡ EXPRESS DISPATCH SLA (≤6M)", f"{exp_disp_sla:.1f}%", f"{'🟢' if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", exp_disp_sla>=TARGET_EXPRESS_DISPATCH)
-    render_metric_card(r2c2, "⚡ EXPRESS DELIVERED SLA", f"{exp_del_sla:.1f}%", f"{'🟢' if exp_del_sla>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", exp_del_sla>=TARGET_EXPRESS_DELIVERY)
-    render_metric_card(r2c3, "STANDARD DELIVERED SLA", f"{std_del_sla:.1f}%", f"{'🟢' if std_del_sla>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", std_del_sla>=TARGET_STANDARD_DELIVERY)
+    render_metric_card(r2c1, "⚡ EXPRESS DELIVERED SLA", f"{exp_del_sla:.1f}%", f"{'🟢' if exp_del_sla>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", "green" if exp_del_sla>=TARGET_EXPRESS_DELIVERY else "red")
+    render_metric_card(r2c2, "STANDARD DELIVERED SLA", f"{std_del_sla:.1f}%", f"{'🟢' if std_del_sla>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", "green" if std_del_sla>=TARGET_STANDARD_DELIVERY else "red")
+    render_metric_card(r2c3, "🏍️ RIDER PRODUCTIVITY & FLEET", f"{len(self_orders_df)} Self | {tpl_orders_count} 3PL", f"Active Riders: {active_rider_count} | Avg Delivered: {avg_orders_per_rider:.1f}/Rider", "neutral")
 
     st.divider()
 
-    # Trend Charts (Last 7 Days)
-    min_date = selected_date - datetime.timedelta(days=6)
-    trend_df = orders_df[(orders_df['Order_Date'] >= min_date) & (orders_df['Order_Date'] <= selected_date)].copy()
+    # Trend Charts Box
+    st.markdown('<div class="page-container">', unsafe_allow_html=True)
+    ch1, ch2 = st.columns(2)
+    
+    min_trend_dt = end_date - datetime.timedelta(days=6)
+    trend_df = orders_df[(orders_df['Order_Date'] >= min_trend_dt) & (orders_df['Order_Date'] <= end_date)].copy()
 
     if not trend_df.empty:
         daily_trend = trend_df.groupby('Order_Date').apply(lambda g: pd.Series({
@@ -335,9 +391,8 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     else:
         daily_trend = pd.DataFrame(columns=['Order_Date', 'Pick_SLA', 'Dispatch_SLA', 'Exp_Del_SLA', 'Std_Del_SLA'])
 
-    ch1, ch2 = st.columns(2)
     with ch1:
-        st.subheader("Packing & Dispatch Trend (Last 7 Days)")
+        st.subheader("Packing & Dispatch Trend (7-Day Rolling)")
         fig1 = go.Figure()
         fig1.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Pick_SLA'], name="🟢 Packing SLA % (<=3m)", line=dict(color="green", width=3)))
         fig1.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Dispatch_SLA'], name="🔴 Dispatch SLA % (<=6m)", line=dict(color="red", width=3)))
@@ -345,17 +400,19 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
         st.plotly_chart(fig1, use_container_width=True)
 
     with ch2:
-        st.subheader("Delivery SLA Trend (Last 7 Days)")
+        st.subheader("Delivery SLA Trend (7-Day Rolling)")
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Exp_Del_SLA'], name="⚡ Express Delivery SLA %", line=dict(color="blue", width=3)))
         fig2.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Std_Del_SLA'], name="Standard Delivery SLA %", line=dict(color="orange", width=3)))
         fig2.update_layout(yaxis_range=[0, 100], margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig2, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    # Store Wise Summary Table
-    st.subheader("Store Wise Performance Summary")
+    # Store Wise Summary Table Box
+    st.markdown('<div class="page-container">', unsafe_allow_html=True)
+    st.subheader(f"Store Wise Performance Summary ({start_date} to {end_date})")
     if not t1_df.empty:
         summary_rows = []
         for sname, grp in t1_df.groupby('Store Name'):
@@ -377,47 +434,51 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
                 "3PL Orders": len(grp[~grp['Is_Self']])
             })
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No orders found for the selected date range.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
 # PAGE 2: STORE LEVEL VIEW
 # ==========================================
 elif nav_choice == "🏪 Store Level View":
+    st.markdown('<div class="page-container">', unsafe_allow_html=True)
     if user_role == "Manager":
         active_store = st.selectbox("Select Store Scope", sorted(orders_df['Store Name'].dropna().unique()))
     else:
         active_store = assigned_store
         st.info(f"Store Scope: **{active_store}**")
 
-    store_df = orders_df[(orders_df['Store Name'] == active_store) & (orders_df['Order_Date'] == selected_date)].copy()
+    store_df = orders_range_df[orders_range_df['Store Name'] == active_store].copy()
     s_exp = store_df[store_df['Order Type'] == 'Express']
     s_std = store_df[store_df['Order Type'] == 'Standard']
 
     # STORE METRIC CARDS
     sm1, sm2, sm3, sm4, sm5 = st.columns(5)
-    render_metric_card(sm1, "TOTAL STORE ORDERS", f"{len(store_df)}", "Assigned Store Today", True)
+    render_metric_card(sm1, "TOTAL STORE ORDERS", f"{len(store_df)}", f"{start_date} to {end_date}", "neutral")
     
     p_val = (s_exp['Pick_SLA_Met'].mean()*100) if len(s_exp)>0 else 0.0
-    render_metric_card(sm2, "PACK SLA", f"{p_val:.1f}%", f"{'🟢' if p_val>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", p_val>=TARGET_EXPRESS_PACK)
+    render_metric_card(sm2, "PACK SLA", f"{p_val:.1f}%", f"{'🟢' if p_val>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", "green" if p_val>=TARGET_EXPRESS_PACK else "red")
 
     d_val = (s_exp['Dispatch_SLA_Met'].mean()*100) if len(s_exp)>0 else 0.0
-    render_metric_card(sm3, "DISPATCH SLA", f"{d_val:.1f}%", f"{'🟢' if d_val>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", d_val>=TARGET_EXPRESS_DISPATCH)
+    render_metric_card(sm3, "DISPATCH SLA", f"{d_val:.1f}%", f"{'🟢' if d_val>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", "green" if d_val>=TARGET_EXPRESS_DISPATCH else "red")
 
     ex_val = (s_exp['Delivery_SLA_Met'].mean()*100) if len(s_exp)>0 else 0.0
-    render_metric_card(sm4, "EXPRESS DEL SLA", f"{ex_val:.1f}%", f"{'🟢' if ex_val>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", ex_val>=TARGET_EXPRESS_DELIVERY)
+    render_metric_card(sm4, "EXPRESS DEL SLA", f"{ex_val:.1f}%", f"{'🟢' if ex_val>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", "green" if ex_val>=TARGET_EXPRESS_DELIVERY else "red")
 
     st_val = (s_std['Delivery_SLA_Met'].mean()*100) if len(s_std)>0 else 0.0
-    render_metric_card(sm5, "STANDARD DEL SLA", f"{st_val:.1f}%", f"{'🟢' if st_val>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", st_val>=TARGET_STANDARD_DELIVERY)
+    render_metric_card(sm5, "STANDARD DEL SLA", f"{st_val:.1f}%", f"{'🟢' if st_val>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", "green" if st_val>=TARGET_STANDARD_DELIVERY else "red")
 
     st.divider()
 
     # ACTION REQUIRED: DELAY REMARKS
-    st.subheader("ACTION REQUIRED: PENDING DELAYED ORDERS REMARKS")
+    st.subheader(f"ACTION REQUIRED: PENDING DELAYED ORDERS ({start_date} to {end_date})")
     
     dt1, dt2, dt3, dt4 = st.tabs(["📦 Packing Delays", "🚚 Dispatch Delays", "🚴 Delivery Delays", "📁 Audit History"])
 
     def render_delay_entry(stage, breach_df):
         if breach_df.empty:
-            st.success(f"No pending {stage} SLA breaches for {selected_date}!")
+            st.success(f"No pending {stage} SLA breaches for this date range!")
             return
             
         for idx, row in breach_df.iterrows():
@@ -451,16 +512,16 @@ elif nav_choice == "🏪 Store Level View":
         render_delay_entry("Delivery", del_b)
 
     with dt4:
-        hist = remarks_df[(remarks_df['Store Name'] == active_store) & (remarks_df['Order Date'].astype(str) == str(selected_date))]
+        hist = remarks_df[(remarks_df['Store Name'] == active_store) & (pd.to_datetime(remarks_df['Order Date']).dt.date >= start_date) & (pd.to_datetime(remarks_df['Order Date']).dt.date <= end_date)]
         if not hist.empty:
             st.dataframe(hist, hide_index=True, use_container_width=True)
         else:
-            st.info("No saved remarks found.")
+            st.info("No saved remarks found for this range.")
 
     st.divider()
 
-    # RIDER PRODUCTIVITY
-    st.subheader("🏍️ Rider Productivity & Performance (Today)")
+    # RIDER PRODUCTIVITY & PERFORMANCE TABLE
+    st.subheader(f"🏍️ Rider Productivity & Performance ({start_date} to {end_date})")
     store_self = store_df[store_df['Is_Self']]
     if not store_self.empty:
         r_list = []
@@ -479,17 +540,22 @@ elif nav_choice == "🏪 Store Level View":
                 "CPO (Cost/Order)": f"₹{cpo:.2f}"
             })
         st.dataframe(pd.DataFrame(r_list), use_container_width=True, hide_index=True)
+    else:
+        st.info("No self-rider order logs found for this date range.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
 # PAGE 3: MANAGER AUDIT VIEW
 # ==========================================
 elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
+    st.markdown('<div class="page-container">', unsafe_allow_html=True)
     st.title("🛡️ Manager Audit & Review View")
+    st.caption(f"Showing audit logs between {start_date} and {end_date}")
     
     p_rem = remarks_df[remarks_df['Status'] == 'PENDING'].copy() if 'Status' in remarks_df.columns else pd.DataFrame()
     st.subheader("📋 PENDING REMARKS FOR APPROVAL")
     if p_rem.empty:
-        st.success("All delay remarks have been audited!")
+        st.success("All delay remarks have been audited for this range!")
     else:
         st.dataframe(p_rem, use_container_width=True, hide_index=True)
 
@@ -500,3 +566,4 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
         st.dataframe(app_rem, use_container_width=True, hide_index=True)
     else:
         st.info("No approved logs found.")
+    st.markdown('</div>', unsafe_allow_html=True)
