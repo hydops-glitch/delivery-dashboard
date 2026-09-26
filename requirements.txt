@@ -1,7 +1,6 @@
 streamlit
 pandas
 numpy
+plotly
+st-gsheets-connection
 openpyxl
-xlrd
-gspread
-oauth2client
