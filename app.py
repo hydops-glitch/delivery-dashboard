@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import datetime
 import plotly.graph_objects as go
-from streamlit_gsheets import GSheetsConnection
 
 # ==========================================
 # 1. PAGE CONFIGURATION & STYLING
@@ -28,6 +27,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DAILY_RIDER_COST = 1050.0  # ₹1050 per rider per day
+SHEET_ID = "1RUxzJbHW7HHUxbT2sJzNvBrNatLsvgBss6W86CdgMzo"
 
 # ==========================================
 # 2. AUTHENTICATION & ROLE-BASED ACCESS
@@ -60,7 +60,7 @@ raw_name = st.session_state['user_email'].split('@')[0].replace('.', ' ').title(
 display_name = "Sreekanth" if "sreekanth" in raw_name.lower() else raw_name
 
 # ==========================================
-# 3. GOOGLE SHEETS DATA ENGINE
+# 3. DIRECT GOOGLE SHEETS ENGINE (NO 400 ERROR)
 # ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
@@ -72,72 +72,64 @@ def parse_zone_minutes(zone_str):
     if '2.5' in z or '150' in z: return 150.0
     return 45.0
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=60)
 def load_all_data():
-    conn = st.connection("gsheets", type=GSheetsConnection)
+    raw_orders_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Raw_Orders"
+    delay_remarks_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Delay_Remarks"
+    store_mapping_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Store_Mapping"
+
+    # Read Raw Orders
+    raw_df = pd.read_csv(raw_orders_url)
     
-    # Load Orders from Google Sheet with updated column structure
-    raw_df = conn.read(worksheet="Raw_Orders")
-    
-    # Filter out cancelled / failed orders
+    # Filter cancelled / failed orders
     df = raw_df[~raw_df['Order Status'].astype(str).str.upper().isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
     if 'Was Cancelled' in df.columns:
         df = df[df['Was Cancelled'].astype(str).str.upper() != 'TRUE']
-    
-    # Datetime parse
+
+    # Date parsing
     dt_cols = ['Order date time', 'Placed Time', 'InPicking Time', 'Packed Time', 'Dispatched Time', 'Completed Time']
     for col in dt_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
             
-    # Derive Order_Date from 'Order date time' (fallback to 'Placed Time')
     if 'Order date time' in df.columns and df['Order date time'].notna().any():
         df['Order_Date'] = df['Order date time'].dt.date
     else:
         df['Order_Date'] = df['Placed Time'].dt.date
-        
+
     df['Delivery_Partner_Norm'] = df['Delivery Partner'].fillna('').astype(str).str.strip().str.upper()
     df['Is_Self'] = df['Delivery_Partner_Norm'] == 'SELF'
     
-    # Pick Duration (InPicking -> Packed, fallback Placed -> Packed)
+    # SLA Durations & Logic
     has_inpick = df['InPicking Time'].notna() & (df['InPicking Time'] <= df['Packed Time'])
     df['Pick_Start'] = np.where(has_inpick, df['InPicking Time'], df['Placed Time'])
     df['Pick_Mins'] = (df['Packed Time'] - df['Pick_Start']).dt.total_seconds() / 60.0
     df['Pick_SLA_Met'] = df['Pick_Mins'] <= 3.0
     
-    # Dispatch Duration (Packed -> Dispatched)
     df['Dispatch_Mins'] = (df['Dispatched Time'] - df['Packed Time']).dt.total_seconds() / 60.0
     df['Dispatch_SLA_Met'] = df['Dispatch_Mins'] <= 6.0
     
-    # Zone Delivery Duration (Placed -> Completed)
     df['Zone_Target'] = df['Zone'].apply(parse_zone_minutes)
     df['Delivery_Mins'] = (df['Completed Time'] - df['Placed Time']).dt.total_seconds() / 60.0
     df['Delivery_SLA_Met'] = df['Delivery_Mins'] <= df['Zone_Target']
 
-    # Load Remarks & Mapping
+    # Read Remarks & Mapping sheets
     try:
-        remarks_df = conn.read(worksheet="Delay_Remarks")
-    except:
+        remarks_df = pd.read_csv(delay_remarks_url)
+    except Exception:
         remarks_df = pd.DataFrame(columns=['Timestamp', 'Order ID', 'Order Date', 'Store Name', 'Stage', 'Delay Duration (Mins)', 'Delay Reason', 'Status', 'Manager Feedback', 'Submitted By'])
         
     try:
-        mapping_df = conn.read(worksheet="Store_Mapping")
-    except:
+        mapping_df = pd.read_csv(store_mapping_url)
+    except Exception:
         mapping_df = pd.DataFrame({'Store Email': [st.session_state['user_email']], 'Store Name': ['ALL'], 'Role': ['Manager']})
 
     return df, remarks_df, mapping_df
 
-def write_remark_to_gsheets(new_row_dict):
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    existing_remarks = conn.read(worksheet="Delay_Remarks")
-    updated_df = pd.concat([existing_remarks, pd.DataFrame([new_row_dict])], ignore_index=True)
-    conn.update(worksheet="Delay_Remarks", data=updated_df)
-    st.cache_data.clear()
-
 try:
     orders_df, remarks_df, mapping_df = load_all_data()
 except Exception as e:
-    st.error(f"Google Sheets Connection Error: {e}")
+    st.error(f"Error connecting to Google Sheets: {e}")
     st.stop()
 
 # Determine User Role and Assigned Store Scope
@@ -147,7 +139,7 @@ if not user_mapping.empty:
     assigned_store = user_mapping.iloc[0]['Store Name']
 else:
     user_role = "Store"
-    assigned_store = "TGN_HYD_HiTech"  # Default fallback
+    assigned_store = "TGN_HYD_HiTech"
 
 # Sidebar Controls
 with st.sidebar:
@@ -180,7 +172,7 @@ with tab1:
 
     # Date Scope Selector
     date_options = sorted(orders_df['Order_Date'].dropna().unique(), reverse=True)
-    sel_date = st.selectbox("Select Target Date", options=date_options, index=0, key="t1_date") if date_options else datetime.date.today()
+    sel_date = st.selectbox("Select Target Date", options=date_options, index=0, key="t1_date") if len(date_options) > 0 else datetime.date.today()
 
     # Scope Filter
     if user_role == "Manager":
@@ -194,7 +186,7 @@ with tab1:
     # Top KPI Row
     k1, k2, k3, k4 = st.columns(4)
     total_ord = len(t1_df)
-    del_ord = len(t1_df[t1_df['Order Status'].astype(str).str.upper() == 'DELIVERED'])
+    del_ord = len(t1_df[t1_df['Order Status'] == 'DELIVERED'])
     k1.metric("Today's Orders", f"{total_ord}")
     k2.metric("Delivered Today", f"{del_ord}", "All Stores Delivered" if user_role == "Manager" else "Store Delivered")
     
@@ -224,10 +216,10 @@ with tab1:
     # Daily aggregation
     if not trend_df.empty:
         daily_trend = trend_df.groupby('Order_Date').apply(lambda g: pd.Series({
-            'Pick_SLA': g[g['Order Type']=='Express']['Pick_SLA_Met'].mean() * 100 if len(g[g['Order Type']=='Express']) > 0 else 0.0,
-            'Dispatch_SLA': g[g['Order Type']=='Express']['Dispatch_SLA_Met'].mean() * 100 if len(g[g['Order Type']=='Express']) > 0 else 0.0,
-            'Exp_Del_SLA': g[g['Order Type']=='Express']['Delivery_SLA_Met'].mean() * 100 if len(g[g['Order Type']=='Express']) > 0 else 0.0,
-            'Std_Del_SLA': g[g['Order Type']=='Standard']['Delivery_SLA_Met'].mean() * 100 if len(g[g['Order Type']=='Standard']) > 0 else 0.0
+            'Pick_SLA': (g[g['Order Type']=='Express']['Pick_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Express']) > 0 else 0.0,
+            'Dispatch_SLA': (g[g['Order Type']=='Express']['Dispatch_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Express']) > 0 else 0.0,
+            'Exp_Del_SLA': (g[g['Order Type']=='Express']['Delivery_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Express']) > 0 else 0.0,
+            'Std_Del_SLA': (g[g['Order Type']=='Standard']['Delivery_SLA_Met'].mean() * 100) if len(g[g['Order Type']=='Standard']) > 0 else 0.0
         })).reset_index()
     else:
         daily_trend = pd.DataFrame(columns=['Order_Date', 'Pick_SLA', 'Dispatch_SLA', 'Exp_Del_SLA', 'Std_Del_SLA'])
@@ -333,21 +325,7 @@ with tab2:
                     c3.caption(f"⚠️ Manager Rejection Note: {mgr_feedback}")
                 
                 if c4.button("Save Remark", key=f"btn_{stage_name}_{row['Order ID']}"):
-                    new_entry = {
-                        'Timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'Order ID': row['Order ID'],
-                        'Order Date': str(row['Order_Date']),
-                        'Store Name': active_store,
-                        'Stage': stage_name,
-                        'Delay Duration (Mins)': round(row['Delay_Mins'], 1),
-                        'Delay Reason': reason_input,
-                        'Status': 'PENDING',
-                        'Manager Feedback': '',
-                        'Submitted By': st.session_state['user_email']
-                    }
-                    write_remark_to_gsheets(new_entry)
-                    st.success("Remark Submitted!")
-                    st.rerun()
+                    st.info("To submit updates, please edit directly in the Google Sheet Delay_Remarks tab.")
             st.divider()
 
     # 1. Packing Delays (Express Orders > 3 mins)
@@ -371,7 +349,7 @@ with tab2:
     # 4. Saved / Audit History (View all saved remarks for selected date)
     with sub_t4:
         st.write(f"**Saved Remarks History for {active_store} on {filter_dt}**")
-        saved_history = remarks_df[(remarks_df['Store Name'] == active_store) & (remarks_df['Order Date'] == str(filter_dt))]
+        saved_history = remarks_df[(remarks_df['Store Name'] == active_store) & (remarks_df['Order Date'].astype(str) == str(filter_dt))]
         if not saved_history.empty:
             st.dataframe(saved_history[['Order ID', 'Stage', 'Delay Duration (Mins)', 'Delay Reason', 'Status', 'Manager Feedback', 'Submitted By']], hide_index=True, use_container_width=True)
         else:
@@ -403,40 +381,9 @@ if user_role == "Manager" and tab3 is not None:
         st.title("🛡️ Manager Audit & Review Portal")
         st.caption("Review, approve, or reject store-submitted delay remarks")
 
-        pending_remarks = remarks_df[remarks_df['Status'] == 'PENDING'].copy()
+        pending_remarks = remarks_df[remarks_df['Status'] == 'PENDING'].copy() if 'Status' in remarks_df.columns else pd.DataFrame()
 
         if pending_remarks.empty:
             st.success("All submitted delay remarks have been audited! No pending reviews.")
         else:
-            for idx, r_row in pending_remarks.iterrows():
-                with st.container():
-                    mc1, mc2, mc3 = st.columns([2, 3, 2])
-                    mc1.write(f"**Order ID:** {r_row['Order ID']} | **Date:** {r_row['Order Date']}")
-                    mc1.write(f"**Store:** {r_row['Store Name']} | **Stage:** {r_row['Stage']}")
-                    
-                    mc2.write(f"**Delay:** `{r_row['Delay Duration (Mins)']} mins`")
-                    mc2.write(f"**Submitted Reason:** {r_row['Delay Reason']}")
-                    
-                    feedback = mc2.text_input("Rejection Feedback (Required if Rejecting)", key=f"mgr_fb_{idx}")
-                    
-                    btn_col1, btn_col2 = mc3.columns(2)
-                    if btn_col1.button("✅ Approve", key=f"app_{idx}"):
-                        remarks_df.loc[idx, 'Status'] = 'APPROVED'
-                        conn = st.connection("gsheets", type=GSheetsConnection)
-                        conn.update(worksheet="Delay_Remarks", data=remarks_df)
-                        st.cache_data.clear()
-                        st.success("Remark Approved!")
-                        st.rerun()
-                        
-                    if btn_col2.button("❌ Reject", key=f"rej_{idx}"):
-                        if not feedback:
-                            st.warning("Please provide feedback for rejection.")
-                        else:
-                            remarks_df.loc[idx, 'Status'] = 'REJECTED'
-                            remarks_df.loc[idx, 'Manager Feedback'] = feedback
-                            conn = st.connection("gsheets", type=GSheetsConnection)
-                            conn.update(worksheet="Delay_Remarks", data=remarks_df)
-                            st.cache_data.clear()
-                            st.error("Remark Rejected & Sent Back to Store Tab!")
-                            st.rerun()
-                st.divider()
+            st.dataframe(pending_remarks, use_container_width=True)
