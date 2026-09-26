@@ -313,25 +313,12 @@ def render_metric_card(col, title, value, target_text, status_type="green"):
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
 # ==========================================
-# DIAGNOSTIC DEBUG EXPANDER
-# ==========================================
-with st.expander("🔍 Click to Debug Data Connection", expanded=True):
-    st.write(f"**Logged In Email:** `{user_email}`")
-    st.write(f"**Assigned Store:** `{assigned_store}`")
-    st.write(f"**Selected Date Range:** `{start_date}` to `{end_date}`")
-    st.write(f"**Available Store Names in Data:** `{list(orders_df['Store Name'].dropna().unique())}`")
-    st.write(f"**Available Order Dates in Data:** `{orders_df['Order_Date'].min()}` to `{orders_df['Order_Date'].max()}`")
-    st.write(f"**Total Raw Rows Loaded from Sheet:** {len(orders_df)}")
-    st.write(f"**Rows Remaining After Date Filter:** {len(orders_range_df)}")
-
-# ==========================================
 # PAGE 1: HYD REGION / STORE METRICS VIEW
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
         t1_df = orders_range_df.copy()
     else:
-        # Case-Insensitive String Match
         t1_df = orders_range_df[
             orders_range_df['Store Name'].astype(str).str.strip().str.lower() == assigned_store.strip().lower()
         ].copy()
@@ -339,10 +326,13 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     exp_t1 = t1_df[t1_df['Order Type'] == 'Express']
     std_t1 = t1_df[t1_df['Order Type'] == 'Standard']
 
-    exp_pack_sla = (exp_t1['Pick_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
-    exp_disp_sla = (exp_t1['Dispatch_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
-    exp_del_sla = (exp_t1['Delivery_SLA_Met'].mean() * 100) if len(exp_t1) > 0 else 0.0
-    std_del_sla = (std_t1['Delivery_SLA_Met'].mean() * 100) if len(std_t1) > 0 else 0.0
+    exp_count = len(exp_t1)
+    std_count = len(std_t1)
+
+    exp_pack_sla = (exp_t1['Pick_SLA_Met'].mean() * 100) if exp_count > 0 else 0.0
+    exp_disp_sla = (exp_t1['Dispatch_SLA_Met'].mean() * 100) if exp_count > 0 else 0.0
+    exp_del_sla = (exp_t1['Delivery_SLA_Met'].mean() * 100) if exp_count > 0 else 0.0
+    std_del_sla = (std_t1['Delivery_SLA_Met'].mean() * 100) if std_count > 0 else 0.0
 
     self_orders_df = t1_df[t1_df['Is_Self']]
     tpl_orders_count = len(t1_df) - len(self_orders_df)
@@ -351,7 +341,7 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     avg_orders_per_rider = (len(self_orders_df) / active_rider_count) if active_rider_count > 0 else 0.0
 
     r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-    render_metric_card(r1c1, "TOTAL ORDERS PLACED", f"{len(t1_df)}", f"Range: {start_date} to {end_date}", "neutral")
+    render_metric_card(r1c1, "TOTAL ORDERS PLACED", f"{len(t1_df)}", f"⚡ Express: {exp_count} | Standard: {std_count}", "neutral")
     render_metric_card(r1c2, "DELIVERED ORDERS", f"{len(t1_df[t1_df['Order Status'] == 'DELIVERED'])}", "Completed Deliveries", "green")
     render_metric_card(r1c3, "⚡ EXPRESS PACKING SLA (≤3M)", f"{exp_pack_sla:.1f}%", f"{'🟢' if exp_pack_sla>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", "green" if exp_pack_sla>=TARGET_EXPRESS_PACK else "red")
     render_metric_card(r1c4, "⚡ EXPRESS DISPATCH SLA (≤6M)", f"{exp_disp_sla:.1f}%", f"{'🟢' if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", "green" if exp_disp_sla>=TARGET_EXPRESS_DISPATCH else "red")
@@ -409,6 +399,9 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
             
             summary_rows.append({
                 "Store Name": sname,
+                "Total Orders": len(grp),
+                "Express Orders": len(eg),
+                "Standard Orders": len(sg),
                 "Pack SLA": f"{p_s:.1f}%",
                 "Disp SLA": f"{d_s:.1f}%",
                 "Exp Del SLA": f"{ex_d:.1f}%",
@@ -437,19 +430,22 @@ elif nav_choice == "🏪 Store Level View":
     s_exp = store_df[store_df['Order Type'] == 'Express']
     s_std = store_df[store_df['Order Type'] == 'Standard']
 
+    exp_cnt_store = len(s_exp)
+    std_cnt_store = len(s_std)
+
     sm1, sm2, sm3, sm4, sm5 = st.columns(5)
-    render_metric_card(sm1, "TOTAL STORE ORDERS", f"{len(store_df)}", f"{start_date} to {end_date}", "neutral")
+    render_metric_card(sm1, "TOTAL STORE ORDERS", f"{len(store_df)}", f"⚡ Express: {exp_cnt_store} | Standard: {std_cnt_store}", "neutral")
     
-    p_val = (s_exp['Pick_SLA_Met'].mean()*100) if len(s_exp)>0 else 0.0
+    p_val = (s_exp['Pick_SLA_Met'].mean()*100) if exp_cnt_store > 0 else 0.0
     render_metric_card(sm2, "PACK SLA", f"{p_val:.1f}%", f"{'🟢' if p_val>=TARGET_EXPRESS_PACK else '🔴'} Target: {TARGET_EXPRESS_PACK}%", "green" if p_val>=TARGET_EXPRESS_PACK else "red")
 
-    d_val = (s_exp['Dispatch_SLA_Met'].mean()*100) if len(s_exp)>0 else 0.0
+    d_val = (s_exp['Dispatch_SLA_Met'].mean()*100) if exp_cnt_store > 0 else 0.0
     render_metric_card(sm3, "DISPATCH SLA", f"{d_val:.1f}%", f"{'🟢' if d_val>=TARGET_EXPRESS_DISPATCH else '🔴'} Target: {TARGET_EXPRESS_DISPATCH}%", "green" if d_val>=TARGET_EXPRESS_DISPATCH else "red")
 
-    ex_val = (s_exp['Delivery_SLA_Met'].mean()*100) if len(s_exp)>0 else 0.0
+    ex_val = (s_exp['Delivery_SLA_Met'].mean()*100) if exp_cnt_store > 0 else 0.0
     render_metric_card(sm4, "EXPRESS DEL SLA", f"{ex_val:.1f}%", f"{'🟢' if ex_val>=TARGET_EXPRESS_DELIVERY else '🔴'} Target: {TARGET_EXPRESS_DELIVERY}%", "green" if ex_val>=TARGET_EXPRESS_DELIVERY else "red")
 
-    st_val = (s_std['Delivery_SLA_Met'].mean()*100) if len(s_std)>0 else 0.0
+    st_val = (s_std['Delivery_SLA_Met'].mean()*100) if std_cnt_store > 0 else 0.0
     render_metric_card(sm5, "STANDARD DEL SLA", f"{st_val:.1f}%", f"{'🟢' if st_val>=TARGET_STANDARD_DELIVERY else '🔴'} Target: {TARGET_STANDARD_DELIVERY}%", "green" if st_val>=TARGET_STANDARD_DELIVERY else "red")
 
     st.divider()
