@@ -71,7 +71,7 @@ TARGET_STANDARD_DELIVERY = 99.0
 
 APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 
-# Set default master passwords
+# Default Access Passwords
 MANAGER_PASSWORD = "Manager@Meatigo2026"
 STORE_PASSWORD = "Meatigo@2026"
 
@@ -99,7 +99,7 @@ if not st.session_state["user_email"]:
                 # Verify company domain
                 if not any(clean_email.endswith(dom) for dom in APPROVED_DOMAINS):
                     st.error("Access Denied: Email domain must be @prasuma.com or @meatigo.com")
-                elif "hyd_ops" in clean_email or "sreekanth" in clean_email or "manager" in clean_email:
+                elif any(k in clean_email for k in ["hyd_ops", "sreekanth", "manager"]):
                     if password_input == MANAGER_PASSWORD:
                         st.session_state["user_email"] = clean_email
                         st.success("Manager Login Successful!")
@@ -119,7 +119,7 @@ if not st.session_state["user_email"]:
 user_email = st.session_state["user_email"].strip().lower()
 
 # ==========================================
-# 3. DATA ENGINE & GOOGLE SHEET SYNC
+# 3. DATA ENGINE & DYNAMIC STORE MAPPING
 # ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
@@ -188,21 +188,35 @@ except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
-# Role Assignment dynamically from Store_Mapping Google Sheet
+# Check dynamic mapping sheet first
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
+
 if not user_mapping.empty:
-    user_role = user_mapping.iloc[0]['Role'].strip().title()
-    assigned_store = user_mapping.iloc[0]['Store Name'].strip()
+    user_role = str(user_mapping.iloc[0]['Role']).strip().title()
+    assigned_store = str(user_mapping.iloc[0]['Store Name']).strip()
 else:
-    if "ops" in user_email or "manager" in user_email or "sreekanth" in user_email:
+    # Manager / Ops handling
+    if any(k in user_email for k in ["hyd_ops", "sreekanth", "manager"]):
         user_role = "Manager"
         assigned_store = "ALL"
     else:
         user_role = "Store"
-        assigned_store = sorted(orders_df['Store Name'].dropna().unique())[0] if not orders_df.empty else "TGN_HYD_BHills"
+        available_stores = list(orders_df['Store Name'].dropna().unique())
+        
+        # Smart Keyword Extraction (e.g., extracts 'bhills' from 'hyd_bhills@meatigo.com')
+        email_prefix = user_email.split('@')[0].replace('hyd_', '').replace('_ops', '').replace('store_', '').replace('_', '')
+        
+        matched_store = None
+        for store in available_stores:
+            clean_store_name = store.lower().replace('_', '')
+            if email_prefix.lower() in clean_store_name or clean_store_name in email_prefix.lower():
+                matched_store = store
+                break
+        
+        assigned_store = matched_store if matched_store else (available_stores[0] if available_stores else "TGN_HYD_BHills")
 
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
-display_name = "Sreekanth" if "sreekanth" in raw_name.lower() or "hyd_ops" in raw_name.lower() else raw_name
+display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "hyd ops"]) else raw_name
 
 # ==========================================
 # 4. SIDEBAR NAVIGATION
