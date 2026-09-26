@@ -179,6 +179,7 @@ def load_all_data():
 
     try:
         fetched_remarks = pd.read_csv(delay_remarks_url)
+        fetched_remarks['Order ID'] = fetched_remarks['Order ID'].astype(str)
     except Exception:
         fetched_remarks = pd.DataFrame(columns=['Timestamp', 'Order ID', 'Order Date', 'Store Name', 'Stage', 'Delay Duration (Mins)', 'Delay Reason', 'Status', 'Manager Feedback', 'Submitted By'])
         
@@ -196,8 +197,6 @@ try:
 except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
-
-remarks_df = st.session_state["remarks_data"]
 
 # Mapping user scope
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
@@ -228,17 +227,19 @@ display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "
 
 # Helper Functions for Remark Submissions & Approvals
 def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, reason):
-    df = st.session_state["remarks_data"]
-    # Check if entry already exists
-    idx = df[(df['Order ID'].astype(str) == str(order_id)) & (df['Stage'] == stage)].index
+    df = st.session_state["remarks_data"].copy()
+    str_order_id = str(order_id).strip()
+    
+    # Check if entry already exists (by String ID & Stage)
+    idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
     
     new_entry = {
         'Timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'Order ID': str(order_id),
+        'Order ID': str_order_id,
         'Order Date': str(order_date),
         'Store Name': store_name,
         'Stage': stage,
-        'Delay Duration (Mins)': round(delay_mins, 1),
+        'Delay Duration (Mins)': round(float(delay_mins), 1),
         'Delay Reason': reason,
         'Status': 'PENDING',
         'Manager Feedback': '',
@@ -254,8 +255,9 @@ def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, rea
     st.session_state["remarks_data"] = df
 
 def update_manager_action(order_id, stage, new_status, feedback=""):
-    df = st.session_state["remarks_data"]
-    idx = df[(df['Order ID'].astype(str) == str(order_id)) & (df['Stage'] == stage)].index
+    df = st.session_state["remarks_data"].copy()
+    str_order_id = str(order_id).strip()
+    idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
     if not idx.empty:
         df.loc[idx, 'Status'] = new_status
         df.loc[idx, 'Manager Feedback'] = feedback
@@ -503,28 +505,25 @@ elif nav_choice == "🏪 Store Level View":
     def render_delay_entry(stage, breach_df):
         rem_df = st.session_state["remarks_data"]
         
-        # Hide orders that are already submitted and marked as PENDING or APPROVED
-        # Show only orders with no record or with REJECTED status from manager
         active_entries = []
         for idx, row in breach_df.iterrows():
-            oid = str(row['Order ID'])
-            existing = rem_df[(rem_df['Order ID'].astype(str) == oid) & (rem_df['Stage'] == stage)]
+            oid = str(row['Order ID']).strip()
+            existing = rem_df[(rem_df['Order ID'].astype(str).str.strip() == oid) & (rem_df['Stage'] == stage)]
             
             if existing.empty:
                 active_entries.append((row, "", "", None))
             else:
                 last_rec = existing.iloc[-1]
-                status = str(last_rec['Status']).upper()
+                status = str(last_rec['Status']).upper().strip()
                 if status == 'REJECTED':
                     active_entries.append((row, last_rec['Delay Reason'], last_rec.get('Manager Feedback', ''), 'REJECTED'))
-                # PENDING & APPROVED are hidden from the store action queue
 
         if not active_entries:
             st.success(f"No pending {stage} SLA breaches requiring action!")
             return
 
         for row, prev_reason, manager_fb, status_flag in active_entries:
-            oid = str(row['Order ID'])
+            oid = str(row['Order ID']).strip()
             with st.container():
                 c1, c2, c3, c4 = st.columns([2, 2, 3, 1])
                 
@@ -606,10 +605,14 @@ elif nav_choice == "🏪 Store Level View":
 # ==========================================
 elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
     st.title("🛡️ Manager Audit & Review View")
-    st.caption(f"Review submitted store delay remarks")
+    st.caption("Review submitted store delay remarks")
     
     rem_df = st.session_state["remarks_data"]
-    pending_items = rem_df[rem_df['Status'] == 'PENDING']
+    
+    if not rem_df.empty and 'Status' in rem_df.columns:
+        pending_items = rem_df[rem_df['Status'].astype(str).str.upper().str.strip() == 'PENDING']
+    else:
+        pending_items = pd.DataFrame()
     
     st.subheader("📋 PENDING REMARKS FOR APPROVAL")
     
@@ -617,7 +620,7 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
         st.success("All submitted store delay remarks have been reviewed!")
     else:
         for idx, row in pending_items.iterrows():
-            oid = str(row['Order ID'])
+            oid = str(row['Order ID']).strip()
             stage = row['Stage']
             
             with st.container():
@@ -631,22 +634,26 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
                 c2.write(f"**Store Reason:** {row['Delay Reason']}")
                 c2.write(f"**Submitted By:** {row['Submitted By']}")
                 
-                feedback = c3.text_input("Manager Feedback (Optional if rejecting)", key=f"mfb_{oid}_{stage}")
+                feedback = c3.text_input("Manager Feedback (Optional)", key=f"mfb_{oid}_{stage}")
                 
                 with c4:
                     col_app, col_rej = st.columns(2)
                     if col_app.button("✅ Approve", key=f"app_{oid}_{stage}", type="primary"):
                         update_manager_action(oid, stage, "APPROVED", feedback)
-                        st.success("Approved!")
+                        st.success(f"Order {oid} Approved!")
                         st.rerun()
                     if col_rej.button("❌ Reject", key=f"rej_{oid}_{stage}"):
                         update_manager_action(oid, stage, "REJECTED", feedback)
-                        st.warning("Rejected! Sent back to Store Queue.")
+                        st.warning(f"Order {oid} Rejected and returned to Store Queue!")
                         st.rerun()
             st.divider()
 
     st.subheader("📁 AUDIT LOG HISTORY")
-    reviewed_items = rem_df[rem_df['Status'].isin(['APPROVED', 'REJECTED'])]
+    if not rem_df.empty and 'Status' in rem_df.columns:
+        reviewed_items = rem_df[rem_df['Status'].astype(str).str.upper().str.strip().isin(['APPROVED', 'REJECTED'])]
+    else:
+        reviewed_items = pd.DataFrame()
+
     if not reviewed_items.empty:
         st.dataframe(reviewed_items, use_container_width=True, hide_index=True)
     else:
