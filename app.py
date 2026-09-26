@@ -80,27 +80,53 @@ TARGET_EXPRESS_DISPATCH = 95.0
 TARGET_EXPRESS_DELIVERY = 95.0
 TARGET_STANDARD_DELIVERY = 99.0
 
-# ==========================================
-# 2. GOOGLE AUTHENTICATION (SECURE SINGLE SIGN-ON)
-# ==========================================
-# Streamlit Google Auth enforces real login credentials (no impersonation)
-if not st.experimental_user.is_logged_in:
-    st.title("🥩 Meatigo Operations Portal")
-    st.subheader("Authorized Personnel Login Only")
-    st.write("Please authenticate using your official company Google Account (@prasuma.com or @meatigo.com).")
-    
-    if st.button("🔐 Login with Google"):
-        st.login("google")
-    st.stop()
-
-# Validate Authenticated Domain
-user_email = st.experimental_user.email.strip().lower()
 APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 
+# ==========================================
+# 2. SECURE AUTHENTICATION ENGINE
+# ==========================================
+# Safe check for Streamlit Cloud User Context or Form Authentication
+if "user_email" not in st.session_state:
+    st.session_state["user_email"] = None
+
+# Fallback check for Streamlit headers if deployed with SSO
+st_email = None
+try:
+    if hasattr(st, "user") and getattr(st.user, "email", None):
+        st_email = st.user.email
+    elif hasattr(st, "experimental_user") and getattr(st.experimental_user, "email", None):
+        st_email = st.experimental_user.email
+except Exception:
+    st_email = None
+
+if st_email:
+    st.session_state["user_email"] = st_email.strip().lower()
+
+if not st.session_state["user_email"]:
+    st.title("🥩 Meatigo Operations Portal")
+    st.subheader("Authorized Personnel Login")
+    
+    with st.form("auth_form"):
+        email_in = st.text_input("Enter Company Email", placeholder="hyd_ops@prasuma.com")
+        submit_btn = st.form_submit_button("Access Portal")
+        
+        if submit_btn:
+            clean_e = email_in.strip().lower()
+            if any(clean_e.endswith(dom) for dom in APPROVED_DOMAINS):
+                st.session_state["user_email"] = clean_e
+                st.success("Access Granted!")
+                st.rerun()
+            else:
+                st.error("Access Denied: Please use an official @prasuma.com or @meatigo.com email.")
+    st.stop()
+
+user_email = st.session_state["user_email"]
+
 if not any(user_email.endswith(domain) for domain in APPROVED_DOMAINS):
-    st.error(f"Access Denied: {user_email} is not authorized. Please use a @prasuma.com or @meatigo.com account.")
+    st.error(f"Access Denied: {user_email} is not authorized.")
     if st.button("Logout"):
-        st.logout()
+        st.session_state["user_email"] = None
+        st.rerun()
     st.stop()
 
 # ==========================================
@@ -124,7 +150,7 @@ def load_all_data():
 
     raw_df = pd.read_csv(raw_orders_url)
     
-    # Filter cancelled orders
+    # Exclude cancelled orders
     df = raw_df[~raw_df['Order Status'].astype(str).str.upper().isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
     if 'Was Cancelled' in df.columns:
         df = df[df['Was Cancelled'].astype(str).str.upper() != 'TRUE']
@@ -145,7 +171,7 @@ def load_all_data():
     df['Delivery_Partner_Norm'] = df['Delivery Partner'].fillna('').astype(str).str.strip().str.upper()
     df['Is_Self'] = df['Delivery_Partner_Norm'] == 'SELF'
     
-    # SLAs
+    # SLAs Calculation
     has_inpick = df['InPicking Time'].notna() & (df['InPicking Time'] <= df['Packed Time'])
     df['Pick_Start'] = np.where(has_inpick, df['InPicking Time'], df['Placed Time'])
     df['Pick_Mins'] = (df['Packed Time'] - df['Pick_Start']).dt.total_seconds() / 60.0
@@ -173,7 +199,7 @@ def load_all_data():
 try:
     orders_df, remarks_df, mapping_df = load_all_data()
 except Exception as e:
-    st.error(f"Error connecting to data layer: {e}")
+    st.error(f"Error loading Google Sheet data: {e}")
     st.stop()
 
 # Determine User Role and Scope
@@ -189,12 +215,12 @@ else:
         user_role = "Store"
         assigned_store = "TGN_HYD_BHills"
 
-# Dynamic Display Name
+# Dynamic Greeting Name
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if "sreekanth" in raw_name.lower() or "hyd_ops" in raw_name.lower() else raw_name
 
 # ==========================================
-# 4. CLEAN SIDEBAR NAVIGATION
+# 4. SIDEBAR NAVIGATION
 # ==========================================
 with st.sidebar:
     st.title("🥩 Meatigo Portal")
@@ -214,7 +240,8 @@ with st.sidebar:
 
     st.divider()
     if st.button("🚪 Logout"):
-        st.logout()
+        st.session_state["user_email"] = None
+        st.rerun()
 
 # ==========================================
 # 5. HEADER BAR & DATE RANGE CONTROLS (TOP-RIGHT)
@@ -226,20 +253,18 @@ with top_c1:
     st.title(f"{greeting}, {display_name}!")
 
 with top_c2:
-    # Logged-In User Email Badge above controls
     st.markdown(f"<div style='text-align: right;'><span class='user-header-badge'>👤 {user_email} ({user_role})</span></div>", unsafe_allow_html=True)
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
     
-    # Date Range + Refresh Bar
     d_col1, d_col2, d_col3 = st.columns([2, 2, 1])
-    
-    with d_col1:
-        date_preset = st.selectbox("Date Range", ["Today", "Yesterday", "Custom"], index=0, key="global_date_preset")
     
     available_dates = sorted([d for d in orders_df['Order_Date'].dropna().unique()], reverse=True)
     today_dt = available_dates[0] if len(available_dates) > 0 else datetime.date.today()
     yesterday_dt = available_dates[1] if len(available_dates) > 1 else today_dt
 
+    with d_col1:
+        date_preset = st.selectbox("Date Range", ["Today", "Yesterday", "Custom"], index=0, key="global_date_preset")
+    
     if date_preset == "Today":
         selected_date = today_dt
     elif date_preset == "Yesterday":
@@ -266,10 +291,9 @@ def render_metric_card(col, title, value, target_text, is_met=True):
     """, unsafe_allow_html=True)
 
 # ==========================================
-# TAB 1: HYD REGION METRICS VIEW
+# PAGE 1: HYD REGION METRICS VIEW
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
-    # Scope Filter
     if user_role == "Manager" or assigned_store == "ALL":
         t1_df = orders_df[orders_df['Order_Date'] == selected_date].copy()
     else:
@@ -355,7 +379,7 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
 # ==========================================
-# TAB 2: STORE LEVEL VIEW
+# PAGE 2: STORE LEVEL VIEW
 # ==========================================
 elif nav_choice == "🏪 Store Level View":
     if user_role == "Manager":
@@ -457,7 +481,7 @@ elif nav_choice == "🏪 Store Level View":
         st.dataframe(pd.DataFrame(r_list), use_container_width=True, hide_index=True)
 
 # ==========================================
-# TAB 3: MANAGER AUDIT VIEW
+# PAGE 3: MANAGER AUDIT VIEW
 # ==========================================
 elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
     st.title("🛡️ Manager Audit & Review View")
