@@ -96,7 +96,6 @@ if not st.session_state["user_email"]:
             if submit_login:
                 clean_email = email_input.strip().lower()
                 
-                # Verify company domain
                 if not any(clean_email.endswith(dom) for dom in APPROVED_DOMAINS):
                     st.error("Access Denied: Email domain must be @prasuma.com or @meatigo.com")
                 elif any(k in clean_email for k in ["hyd_ops", "sreekanth", "manager"]):
@@ -188,14 +187,13 @@ except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
-# Check dynamic mapping sheet first
+# Dynamic Mapping & Robust Keyword Fallback
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 
 if not user_mapping.empty:
     user_role = str(user_mapping.iloc[0]['Role']).strip().title()
     assigned_store = str(user_mapping.iloc[0]['Store Name']).strip()
 else:
-    # Manager / Ops handling
     if any(k in user_email for k in ["hyd_ops", "sreekanth", "manager"]):
         user_role = "Manager"
         assigned_store = "ALL"
@@ -203,13 +201,12 @@ else:
         user_role = "Store"
         available_stores = list(orders_df['Store Name'].dropna().unique())
         
-        # Smart Keyword Extraction (e.g., extracts 'bhills' from 'hyd_bhills@meatigo.com')
-        email_prefix = user_email.split('@')[0].replace('hyd_', '').replace('_ops', '').replace('store_', '').replace('_', '')
+        email_prefix = user_email.split('@')[0].replace('hyd_', '').replace('_ops', '').replace('store_', '').replace('_', '').lower()
         
         matched_store = None
         for store in available_stores:
-            clean_store_name = store.lower().replace('_', '')
-            if email_prefix.lower() in clean_store_name or clean_store_name in email_prefix.lower():
+            clean_store = store.lower().replace('_', '')
+            if email_prefix in clean_store or clean_store in email_prefix:
                 matched_store = store
                 break
         
@@ -312,43 +309,32 @@ def render_metric_card(col, title, value, target_text, status_type="green"):
     </div>
     """, unsafe_allow_html=True)
 
-orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
-# ==========================================
-# 5. HEADER BAR & DATE SELECTION
-# ==========================================
-
-# ... (header code remains here) ...
-
-st.divider()
-
+# Filter by Date
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
-# ------------------------------------------------------------------
-# 👇 PASTE THE DEBUG BOX HERE (RIGHT BEFORE PAGE 1) 👇
-# ------------------------------------------------------------------
+# ==========================================
+# DIAGNOSTIC DEBUG EXPANDER
+# ==========================================
 with st.expander("🔍 Click to Debug Data Connection", expanded=True):
     st.write(f"**Logged In Email:** `{user_email}`")
     st.write(f"**Assigned Store:** `{assigned_store}`")
     st.write(f"**Selected Date Range:** `{start_date}` to `{end_date}`")
     st.write(f"**Available Store Names in Data:** `{list(orders_df['Store Name'].dropna().unique())}`")
     st.write(f"**Available Order Dates in Data:** `{orders_df['Order_Date'].min()}` to `{orders_df['Order_Date'].max()}`")
-    st.write(f"**Total Raw Rows in Sheet:** {len(orders_df)}")
-# ------------------------------------------------------------------
+    st.write(f"**Total Raw Rows Loaded from Sheet:** {len(orders_df)}")
+    st.write(f"**Rows Remaining After Date Filter:** {len(orders_range_df)}")
 
 # ==========================================
-# PAGE 1: HYD REGION METRICS VIEW
-# ==========================================
-if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
-    # ... rest of your code ...
-
-# ==========================================
-# PAGE 1: HYD REGION METRICS VIEW
+# PAGE 1: HYD REGION / STORE METRICS VIEW
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
         t1_df = orders_range_df.copy()
     else:
-        t1_df = orders_range_df[orders_range_df['Store Name'] == assigned_store].copy()
+        # Case-Insensitive String Match
+        t1_df = orders_range_df[
+            orders_range_df['Store Name'].astype(str).str.strip().str.lower() == assigned_store.strip().lower()
+        ].copy()
 
     exp_t1 = t1_df[t1_df['Order Type'] == 'Express']
     std_t1 = t1_df[t1_df['Order Type'] == 'Standard']
@@ -444,7 +430,10 @@ elif nav_choice == "🏪 Store Level View":
         active_store = assigned_store
         st.info(f"Store Scope: **{active_store}**")
 
-    store_df = orders_range_df[orders_range_df['Store Name'] == active_store].copy()
+    store_df = orders_range_df[
+        orders_range_df['Store Name'].astype(str).str.strip().str.lower() == active_store.strip().lower()
+    ].copy()
+    
     s_exp = store_df[store_df['Order Type'] == 'Express']
     s_std = store_df[store_df['Order Type'] == 'Standard']
 
