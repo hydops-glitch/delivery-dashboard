@@ -313,6 +313,33 @@ def render_metric_card(col, title, value, target_text, status_type="green"):
     """, unsafe_allow_html=True)
 
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
+# ==========================================
+# 5. HEADER BAR & DATE SELECTION
+# ==========================================
+
+# ... (header code remains here) ...
+
+st.divider()
+
+orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
+
+# ------------------------------------------------------------------
+# 👇 PASTE THE DEBUG BOX HERE (RIGHT BEFORE PAGE 1) 👇
+# ------------------------------------------------------------------
+with st.expander("🔍 Click to Debug Data Connection", expanded=True):
+    st.write(f"**Logged In Email:** `{user_email}`")
+    st.write(f"**Assigned Store:** `{assigned_store}`")
+    st.write(f"**Selected Date Range:** `{start_date}` to `{end_date}`")
+    st.write(f"**Available Store Names in Data:** `{list(orders_df['Store Name'].dropna().unique())}`")
+    st.write(f"**Available Order Dates in Data:** `{orders_df['Order_Date'].min()}` to `{orders_df['Order_Date'].max()}`")
+    st.write(f"**Total Raw Rows in Sheet:** {len(orders_df)}")
+# ------------------------------------------------------------------
+
+# ==========================================
+# PAGE 1: HYD REGION METRICS VIEW
+# ==========================================
+if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
+    # ... rest of your code ...
 
 # ==========================================
 # PAGE 1: HYD REGION METRICS VIEW
