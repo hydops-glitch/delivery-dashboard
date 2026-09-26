@@ -65,7 +65,7 @@ st.markdown("""
 DAILY_RIDER_COST = 1050.0
 SHEET_ID = "1RUxzJbHW7HHUxbT2sJzNvBrNatLsvgBss6W86CdgMzo"
 
-# Google Apps Script Web App Endpoint for permanent Sheets writing
+# Google Apps Script Web App Endpoint
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyfSIeO1ma_eGZPhxyUF1AIyHmqmP-lfS8cGrf1ucxhOYlyChxYQgORltUCPOvWYMEC7Q/exec"
 
 TARGET_EXPRESS_PACK = 99.0
@@ -77,6 +77,13 @@ APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 MANAGER_PASSWORD = "Manager@Meatigo2026"
 STORE_PASSWORD = "Meatigo@2026"
 
+# Expected Schema Standardized
+STANDARD_REMARKS_COLS = [
+    'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
+    'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
+    'Status', 'Manager Feedback', 'Submitted By'
+]
+
 # ==========================================
 # 2. LOGIN & SESSION PERSISTENCE
 # ==========================================
@@ -84,11 +91,7 @@ if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
 
 if "local_remarks" not in st.session_state:
-    st.session_state["local_remarks"] = pd.DataFrame(columns=[
-        'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
-        'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
-        'Status', 'Manager Feedback', 'Submitted By'
-    ])
+    st.session_state["local_remarks"] = pd.DataFrame(columns=STANDARD_REMARKS_COLS)
 
 if not st.session_state["user_email"]:
     st.title("🥩 Meatigo Operations Portal")
@@ -137,7 +140,7 @@ def parse_zone_minutes(zone_str):
     if '2.5' in z or '150' in z: return 150.0
     return 45.0
 
-@st.cache_data(ttl=5) # 5-second TTL ensures real-time sync across Store & Manager accounts
+@st.cache_data(ttl=3) # Low TTL guarantees real-time refresh from Sheets
 def load_all_data():
     raw_orders_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Raw_Orders"
     delay_remarks_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Delay_Remarks"
@@ -177,13 +180,30 @@ def load_all_data():
 
     try:
         fetched_remarks = pd.read_csv(delay_remarks_url)
+        # Clean & map column variations to prevent wiping/None values
+        col_rename_map = {
+            'Order_ID': 'Order ID',
+            'OrderDate': 'Order Date',
+            'Order_Date': 'Order Date',
+            'Store_Name': 'Store Name',
+            'Delay_Duration_(Mins)': 'Delay Duration (Mins)',
+            'Delay Duration': 'Delay Duration (Mins)',
+            'Delay Mins': 'Delay Duration (Mins)',
+            'Delay_Reason': 'Delay Reason',
+            'Reason': 'Delay Reason',
+            'Manager_Feedback': 'Manager Feedback',
+            'Submitted_By': 'Submitted By'
+        }
+        fetched_remarks.rename(columns=col_rename_map, inplace=True)
+        
+        # Ensure standard columns exist
+        for col in STANDARD_REMARKS_COLS:
+            if col not in fetched_remarks.columns:
+                fetched_remarks[col] = ""
+
         fetched_remarks['Order ID'] = fetched_remarks['Order ID'].astype(str).str.strip()
     except Exception:
-        fetched_remarks = pd.DataFrame(columns=[
-            'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
-            'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
-            'Status', 'Manager Feedback', 'Submitted By'
-        ])
+        fetched_remarks = pd.DataFrame(columns=STANDARD_REMARKS_COLS)
         
     try:
         mapping_df = pd.read_csv(store_mapping_url)
@@ -195,7 +215,6 @@ def load_all_data():
 try:
     orders_df, fetched_remarks, mapping_df = load_all_data()
     
-    # Merge fetched remote Google Sheet remarks with local session buffer
     if not st.session_state["local_remarks"].empty:
         all_remarks = pd.concat([fetched_remarks, st.session_state["local_remarks"]], ignore_index=True)
         all_remarks = all_remarks.drop_duplicates(subset=['Order ID', 'Stage'], keep='last')
@@ -203,11 +222,14 @@ try:
         all_remarks = fetched_remarks.copy()
         
     all_remarks['Order ID'] = all_remarks['Order ID'].astype(str).str.strip()
+    # Normalize None / NaN strings
+    all_remarks['Delay Reason'] = all_remarks['Delay Reason'].fillna('').astype(str)
+    all_remarks['Manager Feedback'] = all_remarks['Manager Feedback'].fillna('').astype(str)
 except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
-# Role and Store Mapping
+# Role & Store Mapping Logic
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 
 if not user_mapping.empty:
@@ -232,7 +254,7 @@ else:
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "hyd ops"]) else raw_name
 
-# Store Submission Logic (Sends to Google Apps Script & Buffer)
+# Store Submission Logic
 def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, reason):
     str_order_id = str(order_id).strip()
     
@@ -261,13 +283,12 @@ def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, rea
         
     st.session_state["local_remarks"] = df
 
-    # Post to Google Sheet Web App
     try:
         requests.post(WEBAPP_URL, json=payload, timeout=5)
     except Exception as err:
-        st.warning(f"Note: Saved locally, but Sheet write had a timeout ({err})")
+        st.warning(f"Note: Saved locally, but Sheet write timed out ({err})")
 
-# Manager Action Logic (Sends updates to Google Apps Script & Buffer)
+# Manager Action Logic
 def update_manager_action(order_id, stage, new_status, feedback=""):
     str_order_id = str(order_id).strip()
     
@@ -295,11 +316,10 @@ def update_manager_action(order_id, stage, new_status, feedback=""):
         
     st.session_state["local_remarks"] = df
 
-    # Post to Google Sheet Web App
     try:
         requests.post(WEBAPP_URL, json=payload, timeout=5)
     except Exception as err:
-        st.warning(f"Note: Saved locally, but Sheet write had a timeout ({err})")
+        st.warning(f"Note: Saved locally, but Sheet write timed out ({err})")
 
 # ==========================================
 # 4. SIDEBAR NAVIGATION
@@ -426,15 +446,17 @@ elif nav_choice == "🏪 Store Level View":
             existing = rem_df[(rem_df['Order ID'].astype(str).str.strip() == oid) & (rem_df['Stage'] == stage)]
             
             if existing.empty:
-                # Unsubmitted: Keep in store queue
                 active_entries.append((row, "", "", None))
             else:
                 last_rec = existing.iloc[-1]
-                status = str(last_rec['Status']).upper().strip()
+                status = str(last_rec.get('Status', '')).upper().strip()
+                reason_val = str(last_rec.get('Delay Reason', '')).strip()
+                if reason_val in ['nan', 'None']: reason_val = ''
+                fb_val = str(last_rec.get('Manager Feedback', '')).strip()
+                if fb_val in ['nan', 'None']: fb_val = ''
+
                 if status == 'REJECTED':
-                    # Rejected: Show back in store queue to allow re-submission
-                    active_entries.append((row, last_rec['Delay Reason'], last_rec.get('Manager Feedback', ''), 'REJECTED'))
-                # PENDING or APPROVED entries are filtered out automatically
+                    active_entries.append((row, reason_val, fb_val, 'REJECTED'))
 
         if not active_entries:
             st.success(f"No pending {stage} SLA breaches requiring action!")
@@ -513,19 +535,28 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
         st.success("All submitted store delay remarks have been reviewed!")
     else:
         for idx, row in pending_items.iterrows():
-            oid = str(row['Order ID']).strip()
-            stage = row['Stage']
+            oid = str(row.get('Order ID', '')).strip()
+            stage = row.get('Stage', 'N/A')
+            
+            # Safe row getters prevent missing KeyError and empty/None wiping
+            delay_duration = row.get('Delay Duration (Mins)', row.get('Delay Duration', 0))
+            delay_reason = str(row.get('Delay Reason', '')).strip()
+            if delay_reason in ['', 'nan', 'None']:
+                delay_reason = "No reason provided"
+                
+            submitted_by = str(row.get('Submitted By', 'Store User')).strip()
+            store_name = str(row.get('Store Name', 'Unknown Store')).strip()
             
             with st.container():
                 c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
                 
                 c1.write(f"**Order ID:** {oid}")
-                c1.write(f"**Store:** {row['Store Name']}")
+                c1.write(f"**Store:** {store_name}")
                 c1.write(f"**Stage:** {stage}")
                 
-                c2.write(f"**Delay:** `+{row['Delay Duration (Mins)']} mins`")
-                c2.write(f"**Store Reason:** {row['Delay Reason']}")
-                c2.write(f"**Submitted By:** {row['Submitted By']}")
+                c2.write(f"**Delay:** `+{delay_duration} mins`")
+                c2.write(f"**Store Reason:** {delay_reason}")
+                c2.write(f"**Submitted By:** {submitted_by}")
                 
                 feedback = c3.text_input("Manager Feedback (Optional)", key=f"mfb_{oid}_{stage}")
                 
