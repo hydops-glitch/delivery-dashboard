@@ -5,7 +5,7 @@ import datetime
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. PAGE CONFIGURATION & CUSTOM STYLING
+# 1. PAGE CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(
     page_title="Meatigo Operations Portal",
@@ -57,14 +57,6 @@ st.markdown("""
         border: 1px solid #cbd5e1;
         display: inline-block;
     }
-
-    .page-container {
-        border: 1.5px solid #cbd5e1;
-        border-radius: 12px;
-        padding: 20px;
-        background-color: #ffffff;
-        margin-bottom: 20px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -79,81 +71,55 @@ TARGET_STANDARD_DELIVERY = 99.0
 
 APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 
-# SECURE PASSWORD MAP FOR BACKUP AUTH
-# Store team passwords ensure unauthorized access to manager roles is prevented
-USER_PASSWORDS = {
-    "hyd_ops@prasuma.com": "Manager@Meatigo2026",
-    "sreekanth@prasuma.com": "Manager@Meatigo2026",
-    "bhills_ops@prasuma.com": "Store@BHills2026",
-    "gachibowli_ops@prasuma.com": "Store@Gachi2026",
-    "kondapur_ops@prasuma.com": "Store@Konda2026"
-}
+# Set default master passwords
+MANAGER_PASSWORD = "Manager@Meatigo2026"
+STORE_PASSWORD = "Meatigo@2026"
 
 # ==========================================
-# 2. SECURE AUTHENTICATION ENGINE
+# 2. PASSWORD AUTHENTICATION ENGINE
 # ==========================================
 if "user_email" not in st.session_state:
     st.session_state["user_email"] = None
-
-# Native Google SSO Check
-try:
-    if hasattr(st, "user") and getattr(st.user, "is_logged_in", False):
-        st.session_state["user_email"] = st.user.email
-    elif hasattr(st, "experimental_user") and getattr(st.experimental_user, "is_logged_in", False):
-        st.session_state["user_email"] = st.experimental_user.email
-except Exception:
-    pass
 
 if not st.session_state["user_email"]:
     st.title("🥩 Meatigo Operations Portal")
     st.subheader("Authorized Personnel Login")
     
-    col_sso, col_pass = st.columns([1, 1])
-
-    with col_sso:
-        st.markdown("### Method 1: Google SSO (Recommended)")
-        st.caption("Click below to log in directly with your @prasuma.com Google Workspace Account.")
-        if st.button("🔐 Login with Google SSO", type="primary"):
-            try:
-                st.login("google")
-            except Exception:
-                st.error("Google OAuth is not configured in Streamlit Secrets yet. Use Password Login on the right.")
-
-    with col_pass:
-        st.markdown("### Method 2: Secured Email & Password")
-        with st.form("secure_login_form"):
-            email_in = st.text_input("Company Email", placeholder="hyd_ops@prasuma.com")
-            pass_in = st.text_input("Access Password / PIN", type="password")
-            submit_btn = st.form_submit_button("Authenticate")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        with st.form("password_login_form"):
+            email_input = st.text_input("Company Email", placeholder="hyd_ops@prasuma.com")
+            password_input = st.text_input("Access Password", type="password")
+            submit_login = st.form_submit_button("Login to Portal", type="primary", use_container_width=True)
             
-            if submit_btn:
-                clean_e = email_in.strip().lower()
-                if not any(clean_e.endswith(dom) for dom in APPROVED_DOMAINS):
-                    st.error("Invalid Domain: Use official @prasuma.com or @meatigo.com email.")
-                elif clean_e in USER_PASSWORDS and USER_PASSWORDS[clean_e] == pass_in:
-                    st.session_state["user_email"] = clean_e
-                    st.success("Access Granted!")
-                    st.rerun()
-                elif clean_e not in USER_PASSWORDS and pass_in == "Meatigo@2026":  # Fallback master store password
-                    st.session_state["user_email"] = clean_e
-                    st.success("Access Granted!")
-                    st.rerun()
+            if submit_login:
+                clean_email = email_input.strip().lower()
+                
+                # Verify company domain
+                if not any(clean_email.endswith(dom) for dom in APPROVED_DOMAINS):
+                    st.error("Access Denied: Email domain must be @prasuma.com or @meatigo.com")
+                elif "hyd_ops" in clean_email or "sreekanth" in clean_email or "manager" in clean_email:
+                    if password_input == MANAGER_PASSWORD:
+                        st.session_state["user_email"] = clean_email
+                        st.success("Manager Login Successful!")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect Manager Password.")
                 else:
-                    st.error("Invalid Email or Password! Access Denied.")
+                    if password_input in [STORE_PASSWORD, MANAGER_PASSWORD]:
+                        st.session_state["user_email"] = clean_email
+                        st.success("Store Login Successful!")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect Password.")
 
     st.stop()
 
 user_email = st.session_state["user_email"].strip().lower()
 
-if not any(user_email.endswith(domain) for domain in APPROVED_DOMAINS):
-    st.error(f"Access Denied: {user_email} is not authorized.")
-    if st.button("Logout"):
-        st.session_state.clear()
-        st.rerun()
-    st.stop()
-
 # ==========================================
-# 3. DATA ENGINE
+# 3. DATA ENGINE & GOOGLE SHEET SYNC
 # ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
@@ -222,7 +188,7 @@ except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
-# Role Assignment
+# Role Assignment dynamically from Store_Mapping Google Sheet
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 if not user_mapping.empty:
     user_role = user_mapping.iloc[0]['Role'].strip().title()
@@ -233,7 +199,7 @@ else:
         assigned_store = "ALL"
     else:
         user_role = "Store"
-        assigned_store = "TGN_HYD_BHills"
+        assigned_store = sorted(orders_df['Store Name'].dropna().unique())[0] if not orders_df.empty else "TGN_HYD_BHills"
 
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if "sreekanth" in raw_name.lower() or "hyd_ops" in raw_name.lower() else raw_name
@@ -263,7 +229,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# 5. HEADER BAR & DATE RANGE CONTROLS
+# 5. HEADER BAR & DATE SELECTION
 # ==========================================
 top_c1, top_c2 = st.columns([2, 3])
 
@@ -370,9 +336,7 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
 
     st.divider()
 
-    st.markdown('<div class="page-container">', unsafe_allow_html=True)
     ch1, ch2 = st.columns(2)
-    
     min_trend_dt = end_date - datetime.timedelta(days=6)
     trend_df = orders_df[(orders_df['Order_Date'] >= min_trend_dt) & (orders_df['Order_Date'] <= end_date)].copy()
 
@@ -401,11 +365,9 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
         fig2.add_trace(go.Scatter(x=daily_trend['Order_Date'], y=daily_trend['Std_Del_SLA'], name="Standard Delivery SLA %", line=dict(color="orange", width=3)))
         fig2.update_layout(yaxis_range=[0, 100], margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig2, use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    st.markdown('<div class="page-container">', unsafe_allow_html=True)
     st.subheader(f"Store Wise Performance Summary ({start_date} to {end_date})")
     if not t1_df.empty:
         summary_rows = []
@@ -430,13 +392,11 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
     else:
         st.info("No orders found for the selected date range.")
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
 # PAGE 2: STORE LEVEL VIEW
 # ==========================================
 elif nav_choice == "🏪 Store Level View":
-    st.markdown('<div class="page-container">', unsafe_allow_html=True)
     if user_role == "Manager":
         active_store = st.selectbox("Select Store Scope", sorted(orders_df['Store Name'].dropna().unique()))
     else:
@@ -533,28 +493,26 @@ elif nav_choice == "🏪 Store Level View":
         st.dataframe(pd.DataFrame(r_list), use_container_width=True, hide_index=True)
     else:
         st.info("No self-rider order logs found for this date range.")
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
 # PAGE 3: MANAGER AUDIT VIEW
 # ==========================================
 elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
-    st.markdown('<div class="page-container">', unsafe_allow_html=True)
     st.title("🛡️ Manager Audit & Review View")
     st.caption(f"Showing audit logs between {start_date} and {end_date}")
     
-    p_rem = remarks_df[remarks_df['Status'] == 'PENDING'].copy() if 'Status' in remarks_df.columns else pd.DataFrame()
     st.subheader("📋 PENDING REMARKS FOR APPROVAL")
+    p_rem = remarks_df[remarks_df['Status'] == 'PENDING'].copy() if 'Status' in remarks_df.columns else pd.DataFrame()
     if p_rem.empty:
         st.success("All delay remarks have been audited for this range!")
     else:
         st.dataframe(p_rem, use_container_width=True, hide_index=True)
 
     st.divider()
+    
     st.subheader("📁 HISTORICAL APPROVED DELAY LOGS")
     app_rem = remarks_df[remarks_df['Status'] == 'APPROVED'].copy() if 'Status' in remarks_df.columns else pd.DataFrame()
     if not app_rem.empty:
         st.dataframe(app_rem, use_container_width=True, hide_index=True)
     else:
         st.info("No approved logs found.")
-    st.markdown('</div>', unsafe_allow_html=True)
