@@ -5,6 +5,7 @@ import datetime
 import requests
 import json
 import plotly.graph_objects as go
+import plotly.express as px
 
 # ==========================================
 # 1. PAGE CONFIGURATION & STYLING
@@ -125,7 +126,7 @@ if not st.session_state["user_email"]:
 user_email = st.session_state["user_email"].strip().lower()
 
 # ==========================================
-# 3. DATA ENGINE & LIVE REMARKS SYNC
+# 3. DATA ENGINE & CALCULATIONS
 # ==========================================
 def parse_zone_minutes(zone_str):
     if pd.isna(zone_str): return 45.0
@@ -137,6 +138,21 @@ def parse_zone_minutes(zone_str):
     if '2.5' in z or '150' in z: return 150.0
     return 45.0
 
+def parse_slot_end_datetime(row):
+    try:
+        del_date = pd.to_datetime(row['Delivery Date']).date()
+        slot_str = str(row['Slot End Time']).strip()
+        
+        if ':' in slot_str:
+            parts = slot_str.split(':')
+            hrs, mins = int(parts[0]), int(parts[1])
+        else:
+            hrs, mins = int(float(slot_str)), 0
+            
+        return pd.Timestamp(datetime.datetime.combine(del_date, datetime.time(hrs, mins)))
+    except Exception:
+        return pd.NaT
+
 @st.cache_data(ttl=3)
 def load_all_data():
     raw_orders_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Raw_Orders"
@@ -145,6 +161,7 @@ def load_all_data():
 
     raw_df = pd.read_csv(raw_orders_url)
     df = raw_df[~raw_df['Order Status'].astype(str).str.upper().isin(['PAYMENT FAILED', 'CANCELLED'])].copy()
+    
     if 'Was Cancelled' in df.columns:
         df = df[df['Was Cancelled'].astype(str).str.upper() != 'TRUE']
 
@@ -155,7 +172,7 @@ def load_all_data():
         
     df['Order_Date'] = df['Parsed_DateTime'].dt.date
 
-    dt_cols = ['Placed Time', 'InPicking Time', 'Packed Time', 'Dispatched Time', 'Completed Time']
+    dt_cols = ['Placed Time', 'InPicking Time', 'Packed Time', 'Dispatched Time', 'Completed Time', 'Delivery Date']
     for col in dt_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -163,6 +180,7 @@ def load_all_data():
     df['Delivery_Partner_Norm'] = df['Delivery Partner'].fillna('').astype(str).str.strip().str.upper()
     df['Is_Self'] = df['Delivery_Partner_Norm'] == 'SELF'
     
+    # Express SLA Metrics
     has_inpick = df['InPicking Time'].notna() & (df['InPicking Time'] <= df['Packed Time'])
     df['Pick_Start'] = np.where(has_inpick, df['InPicking Time'], df['Placed Time'])
     df['Pick_Mins'] = (df['Packed Time'] - df['Pick_Start']).dt.total_seconds() / 60.0
@@ -170,10 +188,25 @@ def load_all_data():
     
     df['Dispatch_Mins'] = (df['Dispatched Time'] - df['Packed Time']).dt.total_seconds() / 60.0
     df['Dispatch_SLA_Met'] = df['Dispatch_Mins'] <= 6.0
+
+    # Zone Express Delivery SLA
+    df['Zone_Target'] = df['Zone'].apply(parse_zone_minutes) if 'Zone' in df.columns else 45.0
+    df['Express_Delivery_Mins'] = (df['Completed Time'] - df['Placed Time']).dt.total_seconds() / 60.0
     
-    df['Zone_Target'] = df['Zone'].apply(parse_zone_minutes)
-    df['Delivery_Mins'] = (df['Completed Time'] - df['Placed Time']).dt.total_seconds() / 60.0
-    df['Delivery_SLA_Met'] = df['Delivery_Mins'] <= df['Zone_Target']
+    # Standard Delivery SLA Fix using Delivery Date & Slot End Time
+    df['Slot_End_Deadline'] = df.apply(parse_slot_end_datetime, axis=1)
+    
+    # Combined Delivery SLA Logic
+    def calc_delivery_sla(row):
+        if row['Order Type'] == 'Express':
+            return row['Express_Delivery_Mins'] <= row['Zone_Target']
+        elif row['Order Type'] == 'Standard':
+            if pd.isna(row['Completed Time']) or pd.isna(row['Slot_End_Deadline']):
+                return False
+            return row['Completed Time'] <= row['Slot_End_Deadline']
+        return False
+
+    df['Delivery_SLA_Met'] = df.apply(calc_delivery_sla, axis=1)
 
     try:
         fetched_remarks = pd.read_csv(delay_remarks_url)
@@ -214,7 +247,7 @@ except Exception as e:
     st.error(f"Data loading error: {e}")
     st.stop()
 
-# Role & Store Mapping Logic
+# Role Mapping Logic
 user_mapping = mapping_df[mapping_df['Store Email'].astype(str).str.lower() == user_email]
 
 if not user_mapping.empty:
@@ -239,7 +272,6 @@ else:
 raw_name = user_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
 display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "hyd ops"]) else raw_name
 
-# Store Submission Logic
 def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, reason):
     str_order_id = str(order_id).strip()
     payload = {
@@ -259,7 +291,6 @@ def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, rea
     try: requests.post(WEBAPP_URL, json=payload, timeout=5)
     except Exception: pass
 
-# Manager Action Logic
 def update_manager_action(order_id, stage, new_status, feedback=""):
     str_order_id = str(order_id).strip()
     payload = {
@@ -282,7 +313,6 @@ def update_manager_action(order_id, stage, new_status, feedback=""):
     try: requests.post(WEBAPP_URL, json=payload, timeout=5)
     except Exception: pass
 
-# Helper for Card rendering
 def render_bordered_card(title, value, target_text, target_type):
     target_class = f"metric-target-{target_type}"
     card_html = f"""
@@ -368,7 +398,7 @@ st.divider()
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
 # ==========================================
-# PAGE 1: METRICS VIEW (WITH CARDS, CHARTS & TABLES RESTORED)
+# PAGE 1: METRICS VIEW
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
@@ -391,7 +421,7 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
 
     st.subheader(f"{view_title} ({start_date} to {end_date})")
     
-    # 5 Border Cards Layout
+    # 5 Border Cards
     c1, c2, c3, c4, c5 = st.columns(5)
     
     with c1:
@@ -411,7 +441,32 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
 
     st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
 
-    # STORE COMPARISON TABLE & VISUAL CHARTS
+    # LAST 7 DAYS SLA TREND CHART
+    st.subheader("📈 Last 7 Days SLA Trend")
+    last_7_dates = available_dates[:7]
+    trend_df = orders_df[orders_df['Order_Date'].isin(last_7_dates)].copy()
+    
+    if not trend_df.empty:
+        trend_summary = []
+        for d, df_day in trend_df.groupby('Order_Date'):
+            e_day = df_day[df_day['Order Type'] == 'Express']
+            s_day = df_day[df_day['Order Type'] == 'Standard']
+            
+            trend_summary.append({
+                'Date': d.strftime('%Y-%m-%d'),
+                'Express SLA': (e_day['Delivery_SLA_Met'].mean() * 100) if len(e_day) > 0 else 0,
+                'Standard SLA': (s_day['Delivery_SLA_Met'].mean() * 100) if len(s_day) > 0 else 0
+            })
+            
+        trend_summary_df = pd.DataFrame(trend_summary).sort_values(by='Date')
+        
+        fig_trend = go.Figure()
+        fig_trend.add_trace(go.Scatter(x=trend_summary_df['Date'], y=trend_summary_df['Express SLA'], mode='lines+markers', name='Express Del SLA %', line=dict(color='#10b981', width=3)))
+        fig_trend.add_trace(go.Scatter(x=trend_summary_df['Date'], y=trend_summary_df['Standard SLA'], mode='lines+markers', name='Standard Del SLA %', line=dict(color='#8b5cf6', width=3)))
+        fig_trend.update_layout(yaxis=dict(range=[0, 105]), height=320, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(fig_trend, use_container_width=True)
+
+    # STORE PERFORMANCE TABLE & COMPARISON GRAPH
     if not t1_df.empty:
         st.subheader("🏪 Store SLA Performance Breakdown")
         
@@ -441,7 +496,6 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
             
         store_stats_df = pd.DataFrame(store_stats).sort_values(by="Total Orders", ascending=False)
 
-        # Plotly SLA Chart Comparison
         fig = go.Figure()
         fig.add_trace(go.Bar(x=store_stats_df['Store Name'], y=store_stats_df['Packing SLA (%)'], name='Packing SLA', marker_color='#3b82f6'))
         fig.add_trace(go.Bar(x=store_stats_df['Store Name'], y=store_stats_df['Dispatch SLA (%)'], name='Dispatch SLA', marker_color='#f59e0b'))
@@ -451,18 +505,53 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
         fig.update_layout(
             barmode='group',
             title='Store SLA Performance Comparison',
-            xaxis_title='Store Name',
-            yaxis_title='SLA %',
             yaxis=dict(range=[0, 105]),
-            margin=dict(l=20, r=20, t=40, b=20),
-            height=380,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            height=360,
+            margin=dict(l=20, r=20, t=40, b=20)
         )
-        
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### 📋 Store Metrics Summary Table")
         st.dataframe(store_stats_df, use_container_width=True, hide_index=True)
+
+    # RIDER PRODUCTIVITY SECTION
+    st.subheader("🚴 Rider Productivity & Cost Performance")
+    
+    rider_df = t1_df[t1_df['Is_Self'] & t1_df['Rider Name'].notna()].copy()
+    
+    if not rider_df.empty:
+        rider_stats = []
+        for r_name, rdf in rider_df.groupby('Rider Name'):
+            total_del = len(rdf)
+            days_active = rdf['Order_Date'].nunique()
+            cost_est = days_active * DAILY_RIDER_COST
+            cost_per_order = (cost_est / total_del) if total_del > 0 else 0
+            
+            rider_stats.append({
+                "Rider Name": r_name,
+                "Store": rdf['Store Name'].iloc[0],
+                "Orders Delivered": total_del,
+                "Days Active": days_active,
+                "Est. Rider Cost (₹)": cost_est,
+                "Cost per Order (₹)": round(cost_per_order, 1)
+            })
+            
+        rider_stats_df = pd.DataFrame(rider_stats).sort_values(by="Orders Delivered", ascending=False)
+        
+        r_col1, r_col2 = st.columns([1, 1])
+        with r_col1:
+            fig_rider = px.bar(
+                rider_stats_df, 
+                x='Rider Name', 
+                y='Orders Delivered',
+                color='Store',
+                title="Orders Delivered by Rider"
+            )
+            st.plotly_chart(fig_rider, use_container_width=True)
+            
+        with r_col2:
+            st.markdown("### Rider Summary Table")
+            st.dataframe(rider_stats_df, use_container_width=True, hide_index=True)
 
 # ==========================================
 # PAGE 2: STORE LEVEL VIEW
@@ -548,7 +637,11 @@ elif nav_choice == "🏪 Store Level View":
 
     with dt3:
         del_b = store_df[store_df['Delivery_SLA_Met'] == False].copy()
-        del_b['Delay_Mins'] = del_b['Delivery_Mins'] - del_b['Zone_Target']
+        del_b['Delay_Mins'] = np.where(
+            del_b['Order Type'] == 'Express',
+            del_b['Express_Delivery_Mins'] - del_b['Zone_Target'],
+            (del_b['Completed Time'] - del_b['Slot_End_Deadline']).dt.total_seconds() / 60.0
+        )
         render_delay_entry("Delivery", del_b)
 
     with dt4:
