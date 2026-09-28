@@ -64,8 +64,6 @@ st.markdown("""
 
 DAILY_RIDER_COST = 1050.0
 SHEET_ID = "1RUxzJbHW7HHUxbT2sJzNvBrNatLsvgBss6W86CdgMzo"
-
-# Google Apps Script Web App Endpoint
 WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyfSIeO1ma_eGZPhxyUF1AIyHmqmP-lfS8cGrf1ucxhOYlyChxYQgORltUCPOvWYMEC7Q/exec"
 
 TARGET_EXPRESS_PACK = 99.0
@@ -77,7 +75,6 @@ APPROVED_DOMAINS = ["@prasuma.com", "@meatigo.com"]
 MANAGER_PASSWORD = "Manager@Meatigo2026"
 STORE_PASSWORD = "Meatigo@2026"
 
-# Expected Schema Standardized
 STANDARD_REMARKS_COLS = [
     'Timestamp', 'Order ID', 'Order Date', 'Store Name', 
     'Stage', 'Delay Duration (Mins)', 'Delay Reason', 
@@ -140,7 +137,7 @@ def parse_zone_minutes(zone_str):
     if '2.5' in z or '150' in z: return 150.0
     return 45.0
 
-@st.cache_data(ttl=3) # Low TTL guarantees real-time refresh from Sheets
+@st.cache_data(ttl=3)
 def load_all_data():
     raw_orders_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Raw_Orders"
     delay_remarks_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Delay_Remarks"
@@ -180,27 +177,17 @@ def load_all_data():
 
     try:
         fetched_remarks = pd.read_csv(delay_remarks_url)
-        # Clean & map column variations to prevent wiping/None values
         col_rename_map = {
-            'Order_ID': 'Order ID',
-            'OrderDate': 'Order Date',
-            'Order_Date': 'Order Date',
-            'Store_Name': 'Store Name',
-            'Delay_Duration_(Mins)': 'Delay Duration (Mins)',
-            'Delay Duration': 'Delay Duration (Mins)',
-            'Delay Mins': 'Delay Duration (Mins)',
-            'Delay_Reason': 'Delay Reason',
-            'Reason': 'Delay Reason',
-            'Manager_Feedback': 'Manager Feedback',
-            'Submitted_By': 'Submitted By'
+            'Order_ID': 'Order ID', 'OrderDate': 'Order Date', 'Order_Date': 'Order Date',
+            'Store_Name': 'Store Name', 'Delay_Duration_(Mins)': 'Delay Duration (Mins)',
+            'Delay Duration': 'Delay Duration (Mins)', 'Delay Mins': 'Delay Duration (Mins)',
+            'Delay_Reason': 'Delay Reason', 'Reason': 'Delay Reason',
+            'Manager_Feedback': 'Manager Feedback', 'Submitted_By': 'Submitted By'
         }
         fetched_remarks.rename(columns=col_rename_map, inplace=True)
-        
-        # Ensure standard columns exist
         for col in STANDARD_REMARKS_COLS:
             if col not in fetched_remarks.columns:
                 fetched_remarks[col] = ""
-
         fetched_remarks['Order ID'] = fetched_remarks['Order ID'].astype(str).str.strip()
     except Exception:
         fetched_remarks = pd.DataFrame(columns=STANDARD_REMARKS_COLS)
@@ -214,7 +201,6 @@ def load_all_data():
 
 try:
     orders_df, fetched_remarks, mapping_df = load_all_data()
-    
     if not st.session_state["local_remarks"].empty:
         all_remarks = pd.concat([fetched_remarks, st.session_state["local_remarks"]], ignore_index=True)
         all_remarks = all_remarks.drop_duplicates(subset=['Order ID', 'Stage'], keep='last')
@@ -222,7 +208,6 @@ try:
         all_remarks = fetched_remarks.copy()
         
     all_remarks['Order ID'] = all_remarks['Order ID'].astype(str).str.strip()
-    # Normalize None / NaN strings
     all_remarks['Delay Reason'] = all_remarks['Delay Reason'].fillna('').astype(str)
     all_remarks['Manager Feedback'] = all_remarks['Manager Feedback'].fillna('').astype(str)
 except Exception as e:
@@ -257,52 +242,32 @@ display_name = "Sreekanth" if any(k in raw_name.lower() for k in ["sreekanth", "
 # Store Submission Logic
 def submit_store_remark(order_id, order_date, store_name, stage, delay_mins, reason):
     str_order_id = str(order_id).strip()
-    
     payload = {
         'Timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        'Order ID': str_order_id,
-        'Order Date': str(order_date),
-        'Store Name': store_name,
-        'Stage': stage,
-        'Delay Duration (Mins)': round(float(delay_mins), 1),
-        'Delay Reason': reason,
-        'Status': 'PENDING',
-        'Manager Feedback': '',
-        'Submitted By': user_email,
-        'Action': 'STORE_SUBMIT'
+        'Order ID': str_order_id, 'Order Date': str(order_date), 'Store Name': store_name,
+        'Stage': stage, 'Delay Duration (Mins)': round(float(delay_mins), 1), 'Delay Reason': reason,
+        'Status': 'PENDING', 'Manager Feedback': '', 'Submitted By': user_email, 'Action': 'STORE_SUBMIT'
     }
-
     df = st.session_state["local_remarks"].copy()
     idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
     if not idx.empty:
         for k, v in payload.items():
-            if k in df.columns:
-                df.loc[idx, k] = v
+            if k in df.columns: df.loc[idx, k] = v
     else:
         df = pd.concat([df, pd.DataFrame([payload])], ignore_index=True)
-        
     st.session_state["local_remarks"] = df
-
-    try:
-        requests.post(WEBAPP_URL, json=payload, timeout=5)
-    except Exception as err:
-        st.warning(f"Note: Saved locally, but Sheet write timed out ({err})")
+    try: requests.post(WEBAPP_URL, json=payload, timeout=5)
+    except Exception: pass
 
 # Manager Action Logic
 def update_manager_action(order_id, stage, new_status, feedback=""):
     str_order_id = str(order_id).strip()
-    
     payload = {
-        'Order ID': str_order_id,
-        'Stage': stage,
-        'Status': new_status,
-        'Manager Feedback': feedback,
-        'Action': 'UPDATE_STATUS'
+        'Order ID': str_order_id, 'Stage': stage, 'Status': new_status,
+        'Manager Feedback': feedback, 'Action': 'UPDATE_STATUS'
     }
-    
     df = st.session_state["local_remarks"].copy()
     idx = df[(df['Order ID'].astype(str).str.strip() == str_order_id) & (df['Stage'] == stage)].index
-    
     if idx.empty:
         m_idx = all_remarks[(all_remarks['Order ID'].astype(str).str.strip() == str_order_id) & (all_remarks['Stage'] == stage)]
         if not m_idx.empty:
@@ -313,13 +278,21 @@ def update_manager_action(order_id, stage, new_status, feedback=""):
     else:
         df.loc[idx, 'Status'] = new_status
         df.loc[idx, 'Manager Feedback'] = feedback
-        
     st.session_state["local_remarks"] = df
+    try: requests.post(WEBAPP_URL, json=payload, timeout=5)
+    except Exception: pass
 
-    try:
-        requests.post(WEBAPP_URL, json=payload, timeout=5)
-    except Exception as err:
-        st.warning(f"Note: Saved locally, but Sheet write timed out ({err})")
+# Helper for Card rendering
+def render_bordered_card(title, value, target_text, target_type):
+    target_class = f"metric-target-{target_type}"
+    card_html = f"""
+    <div class="metric-card">
+        <div class="metric-title">{title}</div>
+        <div class="metric-value">{value}</div>
+        <div class="{target_class}">{target_text}</div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
 
 # ==========================================
 # 4. SIDEBAR NAVIGATION
@@ -330,13 +303,13 @@ with st.sidebar:
         nav_choice = st.radio(
             "Navigation Menu",
             ["📊 Hyd Region Metrics View", "🏪 Store Level View", "🛡️ Manager Audit & Review"],
-            index=2
+            index=0
         )
     else:
         nav_choice = st.radio(
             "Navigation Menu",
             ["📊 Store Metrics View", "🏪 Store Level View"],
-            index=1
+            index=0
         )
 
     st.divider()
@@ -395,13 +368,15 @@ st.divider()
 orders_range_df = orders_df[(orders_df['Order_Date'] >= start_date) & (orders_df['Order_Date'] <= end_date)].copy()
 
 # ==========================================
-# PAGE 1: METRICS VIEW
+# PAGE 1: METRICS VIEW (WITH CARDS, CHARTS & TABLES RESTORED)
 # ==========================================
 if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     if user_role == "Manager" or assigned_store == "ALL":
         t1_df = orders_range_df.copy()
+        view_title = "Hyd Region Performance Overview"
     else:
         t1_df = orders_range_df[orders_range_df['Store Name'].astype(str).str.strip().str.lower() == assigned_store.strip().lower()].copy()
+        view_title = f"{assigned_store} Performance Overview"
 
     exp_t1 = t1_df[t1_df['Order Type'] == 'Express']
     std_t1 = t1_df[t1_df['Order Type'] == 'Standard']
@@ -414,12 +389,80 @@ if nav_choice in ["📊 Hyd Region Metrics View", "📊 Store Metrics View"]:
     exp_del_sla = (exp_t1['Delivery_SLA_Met'].mean() * 100) if exp_count > 0 else 0.0
     std_del_sla = (std_t1['Delivery_SLA_Met'].mean() * 100) if std_count > 0 else 0.0
 
-    st.subheader(f"Performance Overview ({start_date} to {end_date})")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Orders", f"{len(t1_df)}")
-    m2.metric("Packing SLA", f"{exp_pack_sla:.1f}%")
-    m3.metric("Dispatch SLA", f"{exp_disp_sla:.1f}%")
-    m4.metric("Express Del SLA", f"{exp_del_sla:.1f}%")
+    st.subheader(f"{view_title} ({start_date} to {end_date})")
+    
+    # 5 Border Cards Layout
+    c1, c2, c3, c4, c5 = st.columns(5)
+    
+    with c1:
+        render_bordered_card("Total Orders", f"{len(t1_df)}", f"Exp: {exp_count} | Std: {std_count}", "neutral")
+    with c2:
+        t_cls = "green" if exp_pack_sla >= TARGET_EXPRESS_PACK else "red"
+        render_bordered_card("Packing SLA (≤3 min)", f"{exp_pack_sla:.1f}%", f"Target: {TARGET_EXPRESS_PACK}%", t_cls)
+    with c3:
+        t_cls = "green" if exp_disp_sla >= TARGET_EXPRESS_DISPATCH else "red"
+        render_bordered_card("Dispatch SLA (≤6 min)", f"{exp_disp_sla:.1f}%", f"Target: {TARGET_EXPRESS_DISPATCH}%", t_cls)
+    with c4:
+        t_cls = "green" if exp_del_sla >= TARGET_EXPRESS_DELIVERY else "red"
+        render_bordered_card("Express Del SLA", f"{exp_del_sla:.1f}%", f"Target: {TARGET_EXPRESS_DELIVERY}%", t_cls)
+    with c5:
+        t_cls = "green" if std_del_sla >= TARGET_STANDARD_DELIVERY else "red"
+        render_bordered_card("Standard Del SLA", f"{std_del_sla:.1f}%", f"Target: {TARGET_STANDARD_DELIVERY}%", t_cls)
+
+    st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+
+    # STORE COMPARISON TABLE & VISUAL CHARTS
+    if not t1_df.empty:
+        st.subheader("🏪 Store SLA Performance Breakdown")
+        
+        store_stats = []
+        for st_name, sdf in t1_df.groupby('Store Name'):
+            s_exp = sdf[sdf['Order Type'] == 'Express']
+            s_std = sdf[sdf['Order Type'] == 'Standard']
+            
+            e_cnt = len(s_exp)
+            st_cnt = len(s_std)
+            
+            p_sla = (s_exp['Pick_SLA_Met'].mean() * 100) if e_cnt > 0 else 0.0
+            d_sla = (s_exp['Dispatch_SLA_Met'].mean() * 100) if e_cnt > 0 else 0.0
+            ed_sla = (s_exp['Delivery_SLA_Met'].mean() * 100) if e_cnt > 0 else 0.0
+            sd_sla = (s_std['Delivery_SLA_Met'].mean() * 100) if st_cnt > 0 else 0.0
+            
+            store_stats.append({
+                "Store Name": st_name,
+                "Total Orders": len(sdf),
+                "Express Orders": e_cnt,
+                "Standard Orders": st_cnt,
+                "Packing SLA (%)": round(p_sla, 1),
+                "Dispatch SLA (%)": round(d_sla, 1),
+                "Express Del SLA (%)": round(ed_sla, 1),
+                "Standard Del SLA (%)": round(sd_sla, 1)
+            })
+            
+        store_stats_df = pd.DataFrame(store_stats).sort_values(by="Total Orders", ascending=False)
+
+        # Plotly SLA Chart Comparison
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=store_stats_df['Store Name'], y=store_stats_df['Packing SLA (%)'], name='Packing SLA', marker_color='#3b82f6'))
+        fig.add_trace(go.Bar(x=store_stats_df['Store Name'], y=store_stats_df['Dispatch SLA (%)'], name='Dispatch SLA', marker_color='#f59e0b'))
+        fig.add_trace(go.Bar(x=store_stats_df['Store Name'], y=store_stats_df['Express Del SLA (%)'], name='Express Del SLA', marker_color='#10b981'))
+        fig.add_trace(go.Bar(x=store_stats_df['Store Name'], y=store_stats_df['Standard Del SLA (%)'], name='Standard Del SLA', marker_color='#8b5cf6'))
+
+        fig.update_layout(
+            barmode='group',
+            title='Store SLA Performance Comparison',
+            xaxis_title='Store Name',
+            yaxis_title='SLA %',
+            yaxis=dict(range=[0, 105]),
+            margin=dict(l=20, r=20, t=40, b=20),
+            height=380,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("### 📋 Store Metrics Summary Table")
+        st.dataframe(store_stats_df, use_container_width=True, hide_index=True)
 
 # ==========================================
 # PAGE 2: STORE LEVEL VIEW
@@ -538,7 +581,6 @@ elif nav_choice == "🛡️ Manager Audit & Review" and user_role == "Manager":
             oid = str(row.get('Order ID', '')).strip()
             stage = row.get('Stage', 'N/A')
             
-            # Safe row getters prevent missing KeyError and empty/None wiping
             delay_duration = row.get('Delay Duration (Mins)', row.get('Delay Duration', 0))
             delay_reason = str(row.get('Delay Reason', '')).strip()
             if delay_reason in ['', 'nan', 'None']:
